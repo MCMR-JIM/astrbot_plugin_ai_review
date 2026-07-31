@@ -1,0 +1,18 @@
+请严格按照下面的 JSON 格式返回审核结果，不要输出任何多余内容、不要使用 Markdown 代码块或注释：
+
+{
+  "illegal": true,
+  "risk": 0,
+  "type": "违规类型",
+  "reason": "违规原因",
+  "evidence": ["证据1", "证据2"],
+  "suggestion": "mute"
+}
+
+字段说明：
+- illegal：布尔值，是否违规。
+- risk：0~100 的整数风险值。
+- type：违规类型，未违规时为空字符串。
+- reason：违规原因说明，未违规时为空字符串。
+- evidence：证据片段数组，引用聊天记录原文，未违规时为空数组。
+- suggestion：建议处罚，只能为 warn/mute/kick/ban/blacklist 之一。
