@@ -1,0 +1,99 @@
+{
+  "history_count": {
+    "type": "int",
+    "description": "每个群缓存聊天条数",
+    "hint": "群聊记录缓存容量，超出自动淘汰旧消息",
+    "default": 50
+  },
+  "review_mode": {
+    "type": "string",
+    "description": "审核触发模式",
+    "hint": "active=仅主动审核，passive=仅被动自动审核，both=两者",
+    "default": "both",
+    "options": ["active", "passive", "both"]
+  },
+  "risk_threshold": {
+    "type": "int",
+    "description": "风险阈值",
+    "hint": "AI 风险值低于该值视为不违规（0~100）",
+    "default": 80
+  },
+  "review_timeout": {
+    "type": "int",
+    "description": "审核任务超时（秒）",
+    "hint": "待审核任务超时后自动失效",
+    "default": 300
+  },
+  "cooldown": {
+    "type": "int",
+    "description": "审核冷却（秒）",
+    "hint": "同一用户两次自动审核的最小间隔，避免连续调用 AI",
+    "default": 300
+  },
+  "enable_blacklist": {
+    "type": "bool",
+    "description": "启用黑库同步",
+    "hint": "通过处罚时是否同步皮梦云黑库",
+    "default": false
+  },
+  "enable_history": {
+    "type": "bool",
+    "description": "启用聊天记录缓存",
+    "hint": "关闭后不再缓存群聊记录",
+    "default": true
+  },
+  "prompt_path": {
+    "type": "string",
+    "description": "自定义 Prompt 目录",
+    "hint": "留空使用插件内置 data/prompts 目录",
+    "default": ""
+  },
+  "whitelist": {
+    "type": "list",
+    "description": "白名单",
+    "hint": "白名单用户不参与自动审核",
+    "default": []
+  },
+  "min_msg_len": {
+    "type": "int",
+    "description": "最短消息长度",
+    "hint": "过短消息不触发审核",
+    "default": 2
+  },
+  "llm_max_concurrency": {
+    "type": "int",
+    "description": "AI 并发上限",
+    "hint": "同时进行的模型请求数上限",
+    "default": 3
+  },
+  "mute_duration": {
+    "type": "int",
+    "description": "禁言时长（秒）",
+    "hint": "mute 处罚的禁言时长",
+    "default": 600
+  },
+  "admin_qq": {
+    "type": "list",
+    "description": "告警通知管理员 QQ",
+    "hint": "AI 调用异常时向其发送告警私聊消息",
+    "default": []
+  },
+  "max_chat_chars": {
+    "type": "int",
+    "description": "发送给 AI 的聊天记录总字符预算",
+    "hint": "超出预算自动丢弃更早的记录，控制 token 消耗",
+    "default": 3000
+  },
+  "max_msg_chars": {
+    "type": "int",
+    "description": "单条消息发送给 AI 的字符上限",
+    "hint": "过长消息自动截断",
+    "default": 200
+  },
+  "punish_pipeline": {
+    "type": "object",
+    "description": "处罚流水线映射",
+    "hint": "示例：{\"mute\": [\"warn\", \"mute\"]}，键为建议处罚，值为有序阶段列表（warn/mute/kick/ban/blacklist）",
+    "default": {}
+  }
+}

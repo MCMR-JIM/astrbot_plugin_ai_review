@@ -1,0 +1,14 @@
+# 本地会话导出（不上传）
+github/
+cmd.md
+对话导出.json
+
+# opencode 本地配置
+.opencode/
+
+# Python
+__pycache__/
+*.pyc
+
+# 打包产物
+*.zip

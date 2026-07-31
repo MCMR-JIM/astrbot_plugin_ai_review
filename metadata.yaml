@@ -1,0 +1,10 @@
+name: "astrbot_plugin_ai_review"
+version: "1.0.0"
+description: "基于 AstrBot 大模型的群聊 AI 审核插件，生成审核建议供管理员确认后执行处罚。"
+author: "N"
+license: "MIT"
+repo: "https://github.com/Ni-ShuWu/astrbot_plugin_ai_review"
+tags: ["review", "ai", "moderation", "security"]
+astrbot_version: ">=4.13.0"
+support_platforms:
+  - aiocqhttp
