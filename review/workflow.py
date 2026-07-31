@@ -317,6 +317,10 @@ class ReviewWorkflow:
     def _cooldown_key(group_id: str, user_id: str) -> str:
         return f"{group_id}:{user_id}"
 
+    def _review_mode(self) -> str:
+        """当前触发模式。"""
+        return str(self._get_config().get("review_mode", "both"))
+
     # ---------- 辅助 ----------
 
     @staticmethod
@@ -360,11 +364,6 @@ class ReviewWorkflow:
             )
         trimmed.reverse()
         return trimmed
-
-    @staticmethod
-    def _review_mode(self_or_config: Any) -> str:
-        """当前触发模式。"""
-        return str(self_or_config._get_config().get("review_mode", "both"))
 
     @staticmethod
     def _to_record(event: "AstrMessageEvent", group_id: str) -> ChatRecord:
