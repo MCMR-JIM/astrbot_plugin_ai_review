@@ -14,7 +14,7 @@ from typing import Any, TYPE_CHECKING
 from ..config import safe_int
 from ..models import ChatRecord, ReviewLog, ReviewResult, ReviewTask
 from ..prompt import PromptManager
-from ..utils.logger import get_logger, log_review
+from ..utils.logger import get_logger, log_event, log_review, review_context
 from ..utils.parser import parse_with_llm_retry
 from .filters import CooldownManager, MessageFilters, to_record, trim_records, user_content
 from .history import HistoryCache
@@ -110,15 +110,21 @@ class ReviewWorkflow:
                 event.get_sender_id(),
             )
             return
-        # 正则规则层：命中已激活规则直接生成任务，跳过 LLM 调用
-        if await self._try_rule_prefilter(event, record, config):
-            return
-        await self._run_review(
-            event,
-            target_user_id=event.get_sender_id(),
-            target_nickname=event.get_sender_name(),
-            current_record=record,
-        )
+        with review_context(
+            group_id=group_id,
+            user_id=event.get_sender_id(),
+            provider=self.llm.last_provider_id,
+        ):
+            log_event("message_received", content=record.content[:80])
+            # 正则规则层：命中已激活规则直接生成任务，跳过 LLM 调用
+            if await self._try_rule_prefilter(event, record, config):
+                return
+            await self._run_review(
+                event,
+                target_user_id=event.get_sender_id(),
+                target_nickname=event.get_sender_name(),
+                current_record=record,
+            )
 
     async def review_target(
         self,
@@ -136,11 +142,18 @@ class ReviewWorkflow:
         Returns:
             生成的审核任务；未触发时返回 None。
         """
-        return await self._run_review(
-            event,
-            target_user_id=target_user_id,
-            target_nickname=target_nickname,
-        )
+        group_id = event.get_group_id()
+        with review_context(
+            group_id=group_id or "",
+            user_id=target_user_id,
+            provider=self.llm.last_provider_id,
+        ):
+            log_event("manual_review", target=target_user_id or "(整体)")
+            return await self._run_review(
+                event,
+                target_user_id=target_user_id,
+                target_nickname=target_nickname,
+            )
 
     async def review_recent(self, event: "AstrMessageEvent") -> ReviewTask | None:
         """主动审核最近聊天记录整体（/review recent）。
@@ -151,7 +164,12 @@ class ReviewWorkflow:
         Returns:
             生成的审核任务；未触发时返回 None。
         """
-        return await self._run_review(event, target_user_id="", target_nickname="")
+        with review_context(
+            group_id=event.get_group_id() or "",
+            provider=self.llm.last_provider_id,
+        ):
+            log_event("manual_review", target="(整体)")
+            return await self._run_review(event, target_user_id="", target_nickname="")
 
     # ---------- 规则层 ----------
 
@@ -226,7 +244,6 @@ class ReviewWorkflow:
             if skip:
                 logger.debug("[AI审核] 主动审核被过滤：%s", reason)
                 return None
-
         records = self.history.get_recent(
             group_id,
             safe_int(config.get("history_count"), 50),
@@ -257,9 +274,11 @@ class ReviewWorkflow:
 
         text = await self.llm.chat(system, user, output, umo)
         if text is None:
+            log_event("llm_call_failed", group_id=group_id)
             return None
         result = await parse_with_llm_retry(self.llm, system, user, output, umo, text)
         if result is None:
+            log_event("parse_failed", group_id=group_id)
             return None
 
         if not result.illegal or result.risk < threshold:
@@ -270,6 +289,7 @@ class ReviewWorkflow:
                 result.risk,
                 threshold,
             )
+            log_event("review_clean", group_id=group_id, risk=result.risk)
             return None
 
         return await self._enqueue_task(
@@ -330,6 +350,8 @@ class ReviewWorkflow:
                 content=user_content(records, target_user_id),
                 risk=result.risk,
                 review_status="pending",
+                task_id=task.task_id,
+                llm_provider=llm_provider,
             )
         )
         logger.info(
@@ -341,5 +363,15 @@ class ReviewWorkflow:
             result.type,
             result.suggestion,
             " 规则=" + rule_id if rule_id else "",
+        )
+        log_event(
+            "review_created",
+            task_id=task.task_id,
+            user_id=target_user_id,
+            risk=result.risk,
+            type=result.type,
+            suggestion=result.suggestion,
+            rule_id=rule_id,
+            provider=llm_provider,
         )
         return task

@@ -217,7 +217,12 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         except asyncio.CancelledError:
             return
         if exc is not None:
-            logger.error("[AI审核] 后台任务异常：%s", exc, exc_info=exc)
+            logger.error(
+                "[AI审核] 后台任务异常（任务=%s）：%s",
+                task.get_name() or "unknown",
+                exc,
+                exc_info=exc,
+            )
 
     def _get_config(self, group_id: str = "") -> dict:
         """返回当前配置字典（供各模块热加载，支持按群覆盖）。"""
