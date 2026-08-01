@@ -222,6 +222,7 @@ class _StubLLM:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.last_provider_id = "stub-model"
 
     async def chat(self, system: str, user: str, output: str, umo: str) -> str:
         self.calls += 1
@@ -338,6 +339,20 @@ class PassiveReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(llm.calls, 1)
         self.assertEqual(count, 1)
 
+    def test_task_records_provider(self) -> None:
+        llm = _StubLLM()
+        llm.last_provider_id = "auto_DeepSeek"
+        cfg = self._make_cfg(True)
+        workflow, _, queue = self._make_workflow(cfg, llm)
+
+        async def scenario() -> list:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.list_pending("g1")
+
+        tasks = asyncio.run(scenario())
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].llm_provider, "auto_DeepSeek")
+
 
 def _make_task(group_id: str = "g1", user_id: str = "u1") -> ReviewTask:
     return ReviewTask.create(
@@ -374,6 +389,7 @@ class SerializationTest(unittest.TestCase):
             timeout=300,
             platform_id="aiocqhttp",
             session_id="session",
+            llm_provider="auto_DeepSeek",
         )
         restored = ReviewTask.from_dict(task.to_dict())
         self.assertEqual(restored.task_id, task.task_id)
@@ -383,6 +399,7 @@ class SerializationTest(unittest.TestCase):
         self.assertEqual(len(restored.context), 1)
         self.assertEqual(restored.context[0].content, "hello")
         self.assertEqual(restored.session_id, "session")
+        self.assertEqual(restored.llm_provider, "auto_DeepSeek")
 
 
 class QueuePersistenceTest(unittest.TestCase):
