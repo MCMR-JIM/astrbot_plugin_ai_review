@@ -10,7 +10,8 @@ AI 自动分析群成员聊天记录，为管理员生成审核建议（风险�
 ## 功能特性
 
 - **主动审核**：`/review @成员`、`/review <uid>`、`/review recent`
-- **被动审核**：收到群消息后后台自动分析（可配置触发模式，不阻塞消息响应）
+- **被动自主审核**：收到群消息后后台自动分析（可配置触发模式，不阻塞消息响应），支持独立开关
+- **被动审核开关**：可在配置面板或 `/review auto on|off` 命令中随时开关被动自主审核
 - **审核队列**：待审核列表 / 详情 / 通过 / 拒绝，超时自动失效
 - **处罚策略**：warn / mute / kick / ban / blacklist，流水线模式，可配置扩展
 - **皮梦云黑库同步**：通过皮梦云黑库插件同步，未安装时自动跳过（弱依赖）
@@ -72,6 +73,7 @@ flowchart TD
 - 记录先写入历史缓存再做过滤，因此管理员/机器人的发言也会进入缓存作为审核上下文（但不会触发审核）。
 - 前置过滤包括：机器人自身消息、管理员/群主、白名单用户、冷却期内的重复触发、空消息与过短消息（`min_msg_len`）。
 - 若 `enable_history=false`，被动审核仍可用：此时以触发审核的那条消息本身作为唯一上下文进行分析。
+- 若 `enable_passive_review=false`（或执行过 `/review auto off`），群消息仍会按 `enable_history` 缓存，但不再自动触发 AI 审核；主动 `/review` 命令不受影响。
 - LLM 返回的 JSON 解析失败会自动重试一次，仍失败则结束本次审核并记录错误日志。
 - 风险判定采用 `illegal == true 且 risk >= risk_threshold` 双重条件，任一不满足即视为不违规。
 
@@ -215,6 +217,7 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 |--------|------|--------|------|
 | `history_count` | int | 50 | 每个群缓存最近聊天条数 |
 | `review_mode` | string | both | 触发模式：`active`（仅主动）/ `passive`（仅被动）/ `both` |
+| `enable_passive_review` | bool | true | 是否启用被动自主审核（关闭后群消息仍缓存但不再自动触发 AI 审核） |
 | `risk_threshold` | int | 80 | AI 风险值低于该值视为不违规 |
 | `review_timeout` | int | 300 | 审核任务超时（秒），超时自动失效 |
 | `cooldown` | int | 300 | 同一用户两次自动审核最小间隔（秒） |
@@ -234,6 +237,7 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 
 - **仅主动审核**：`review_mode=active`（群消息只缓存，不自动分析）
 - **仅被动审核**：`review_mode=passive`；若同时关闭缓存（`enable_history=false`），每次以触发消息本身为上下文审核
+- **临时关闭被动自主审核**：`/review auto off` 或配置 `enable_passive_review=false`（群消息照常缓存，主动 `/review` 命令不受影响）
 - **降低误报**：`risk_threshold=85` 或调高 `min_msg_len`、增加白名单
 - **提高敏感度**：`risk_threshold=70`
 - **避免同一用户频繁触发**：调大 `cooldown`
@@ -248,6 +252,8 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 | `/review @成员` | 审核指定群成员（@ 提及） |
 | `/review <uid>` | 审核指定 QQ / 平台用户 ID |
 | `/review recent` | 审核最近整段聊天记录 |
+| `/review auto on` | 开启被动自主审核 |
+| `/review auto off` | 关闭被动自主审核 |
 | `/review list` | 查看待审核任务（最多 10 条） |
 | `/review detail <id>` | 查看任务详情（证据、聊天上下文） |
 | `/review pass <id>` | 通过任务并执行处罚流水线 |
@@ -292,7 +298,7 @@ python -m unittest discover -s tests -v
 ## 常见问题
 
 - **`/review <uid>` 提示"暂无聊天记录"**：确认 `enable_history=true`，且该群在插件启用后已有消息经过缓存。
-- **被动审核不触发**：检查 `review_mode` 是否为 `passive` / `both`，以及消息是否被前置过滤（机器人、管理员、白名单、冷却、过短）。
+- **被动审核不触发**：检查 `enable_passive_review` 是否为 `true`、`review_mode` 是否为 `passive` / `both`，以及消息是否被前置过滤（机器人、管理员、白名单、冷却、过短）。
 - **修改配置后不生效**：管理面板或 `/reviewconfig` 修改后即时生效；手动编辑配置文件需重载插件或重启。
 - **皮梦云黑库未同步**：确认 `enable_blacklist=true`、皮梦云插件已启用并配置 Bot Token、执行的是 `blacklist` 建议处罚。
 - **AI 返回解析失败**：检查是否修改过 `output.txt` / `reason.txt`，确认模型遵守 JSON 格式；插件会重试一次并在日志中记录错误。

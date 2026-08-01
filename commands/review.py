@@ -39,6 +39,18 @@ class ReviewCommandMixin:
     ):
         """AI 审核命令入口。"""
         cmd = (target or "").strip().lower()
+        if cmd == "auto":
+            sub_cmd = (sub or "").strip().lower()
+            if sub_cmd in ("on", "off"):
+                ok, message = await self.config.set_value(
+                    "enable_passive_review",
+                    "true" if sub_cmd == "on" else "false",
+                )
+                prefix = "✅ 已开启被动自主审核：" if ok else "❌ "
+                yield event.plain_result(prefix + message)
+                return
+            yield event.plain_result(self._usage())
+            return
         if cmd == "recent":
             yield event.plain_result(await self._review_recent(event))
         elif cmd == "list":
@@ -197,6 +209,8 @@ class ReviewCommandMixin:
             "/review @成员     审核指定成员\n"
             "/review <uid>     审核指定 QQ\n"
             "/review recent    审核最近聊天\n"
+            "/review auto on   开启被动自主审核\n"
+            "/review auto off  关闭被动自主审核\n"
             "/review list      查看待审核任务\n"
             "/review detail <id>   查看详情\n"
             "/review pass <id>     通过并执行处罚\n"
