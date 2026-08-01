@@ -15,6 +15,8 @@ from .logger import get_logger
 if TYPE_CHECKING:
     from astrbot.api.star import Context
 
+from ..config import safe_int
+
 _DEFAULT_MAX_CONCURRENCY = 3
 _DEFAULT_TEMPERATURE = 0.3
 _DEFAULT_RETRY_TIMES = 2
@@ -66,7 +68,9 @@ class LLMClient:
     def _sync_config(self) -> None:
         """同步并发上限与温度配置（热加载）。"""
         config = self._get_config()
-        new_limit = int(config.get("llm_max_concurrency", _DEFAULT_MAX_CONCURRENCY))
+        new_limit = safe_int(
+            config.get("llm_max_concurrency"), _DEFAULT_MAX_CONCURRENCY
+        )
         new_limit = max(1, new_limit)
         if new_limit != self._max_concurrency:
             self._semaphore = asyncio.Semaphore(new_limit)

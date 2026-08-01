@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
+from ..config import safe_int
 from ..models import ChatRecord
 
 _DEFAULT_MAXLEN = 50
@@ -38,7 +39,7 @@ class HistoryCache:
         """同步最新配置中的容量与开关。"""
         config = self._get_config()
         self._enabled = bool(config.get("enable_history", True))
-        new_maxlen = int(config.get("history_count", _DEFAULT_MAXLEN))
+        new_maxlen = safe_int(config.get("history_count"), _DEFAULT_MAXLEN)
         new_maxlen = max(1, new_maxlen)
         if new_maxlen != self._maxlen:
             for group_id, dq in self._groups.items():

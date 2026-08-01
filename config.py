@@ -32,6 +32,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "llm_temperature": 0.3,
     "max_pending_per_user": 2,
     "max_pending_total": 200,
+    "enable_regex_prefilter": True,
+    "regex_sediment": True,
+    "regex_min_hits": 5,
+    "regex_min_accuracy": 0.7,
+    "regex_max_rules": 200,
+    "regex_push_interval": 30,
+    "regex_candidate_ttl": 3,
+    "regex_push_target": "group",
+    "regex_push_admin": [],
 }
 
 # 数值型配置的合法范围（闭区间）；不在表中的键不做范围校验。
@@ -48,8 +57,12 @@ _LIMITS: dict[str, tuple[float, float]] = {
     "llm_temperature": (0.0, 2.0),
     "max_pending_per_user": (1, 100),
     "max_pending_total": (1, 10000),
+    "regex_min_hits": (1, 1000),
+    "regex_min_accuracy": (0.0, 1.0),
+    "regex_max_rules": (1, 10000),
+    "regex_push_interval": (0, 10080),
+    "regex_candidate_ttl": (1, 90),
 }
-
 # 支持按群覆盖的配置项。
 _OVERRIDE_KEYS = frozenset(
     {
@@ -63,8 +76,24 @@ _OVERRIDE_KEYS = frozenset(
         "mute_duration",
         "max_chat_chars",
         "max_msg_chars",
+        "enable_regex_prefilter",
+        "regex_sediment",
+        "regex_push_target",
+        "regex_push_admin",
     }
 )
+
+
+def safe_int(value: Any, default: int) -> int:
+    """安全整数转换：非法值回退默认。
+
+    配置面板修改不走 /reviewconfig 的范围校验，脏数据可能直接进入
+    热加载路径；各模块读取数值配置时应使用本函数兜底。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class ConfigManager:
@@ -155,6 +184,12 @@ class ConfigManager:
             "both",
         ):
             return False, "review_mode 只能是 active / passive / both 之一。"
+        if key == "regex_push_target" and str(value).lower() not in (
+            "group",
+            "admin",
+            "off",
+        ):
+            return False, "regex_push_target 只能是 group / admin / off 之一。"
         limits = _LIMITS.get(key)
         if limits is not None and not (limits[0] <= value <= limits[1]):
             return False, f"配置项 {key} 的值需在 {limits[0]} ~ {limits[1]} 之间。"
@@ -203,6 +238,12 @@ class ConfigManager:
             "both",
         ):
             return False, "review_mode 只能是 active / passive / both 之一。"
+        if key == "regex_push_target" and str(value).lower() not in (
+            "group",
+            "admin",
+            "off",
+        ):
+            return False, "regex_push_target 只能是 group / admin / off 之一。"
         limits = _LIMITS.get(key)
         if limits is not None and not (limits[0] <= value <= limits[1]):
             return False, f"配置项 {key} 的值需在 {limits[0]} ~ {limits[1]} 之间。"

@@ -7,12 +7,14 @@
 - /review detail <id>：查看任务详情
 - /review pass <id>：通过并执行处罚
 - /review reject <id>：拒绝任务
+- /review rule list|add|del|disable|enable：管理正则规则
 
-宿主 Star 需提供：self.workflow / self.queue / self.config / self.punisher。
+宿主 Star 需提供：self.workflow / self.queue / self.config / self.punisher / self.rules。
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from astrbot.api.event import filter, AstrMessageEvent
@@ -58,6 +60,10 @@ class ReviewCommandMixin:
         elif cmd == "stats":
             yield event.plain_result(
                 await self._format_stats(event, (sub or "").strip())
+            )
+        elif cmd == "rule":
+            yield event.plain_result(
+                await self._handle_rule(event, (sub or "").strip())
             )
         elif cmd in ("detail", "pass", "reject"):
             yield event.plain_result(await self._handle_task(event, cmd, (sub or "").strip()))
@@ -127,30 +133,30 @@ class ReviewCommandMixin:
         """处理 detail / pass / reject 子命令。"""
         if not task_id:
             return f"❌ 请提供任务 ID：/review {cmd} <id>"
+        task = await self.queue.get(task_id)
+        if task is None:
+            return "❌ 任务不存在或已过期。"
+        if task.group_id != event.get_group_id():
+            return "❌ 该任务不属于当前群，请到对应群处理。"
         if cmd == "detail":
-            task = await self.queue.get(task_id)
-            if task is None:
-                return "❌ 任务不存在或已过期。"
             return self._format_detail(task)
         if cmd == "pass":
-            task = await self.queue.get(task_id)
-            if task is None:
-                return "❌ 任务不存在或已过期。"
             return await self._approve_task(event, task)
-        task = await self.queue.reject(task_id, event.get_sender_id())
-        if task is None:
+        rejected = await self.queue.reject(task_id, event.get_sender_id())
+        if rejected is None:
             return "❌ 任务不存在或已处理。"
-        await self._record_decision(task, approved=False)
+        await self._record_decision(rejected, approved=False)
+        await self._feedback_rule(rejected, approved=False)
         log_review(
             ReviewLog(
-                group_id=task.group_id,
-                user_id=task.user_id,
-                risk=task.result.risk,
+                group_id=rejected.group_id,
+                user_id=rejected.user_id,
+                risk=rejected.result.risk,
                 review_status="rejected",
                 admin_id=event.get_sender_id(),
             )
         )
-        return f"✅ 已拒绝任务 #{task.task_id}。"
+        return f"✅ 已拒绝任务 #{rejected.task_id}。"
 
     async def _approve_task(self, event: AstrMessageEvent, task: "ReviewTask") -> str:
         """通过任务并执行处罚。"""
@@ -160,6 +166,17 @@ class ReviewCommandMixin:
             return "❌ 任务已处理或已过期。"
         punishment_msg = await self._execute_punishment(approved, admin_id)
         await self._record_decision(approved, approved=True)
+        await self._feedback_rule(approved, approved=True)
+        # 非规则命中任务：异步提炼规则候选（进入待审批池）
+        rules = getattr(self, "rules", None)
+        if rules is not None and not approved.rule_id:
+            asyncio.create_task(
+                rules.collect_candidate(
+                    getattr(self, "llm", None),
+                    getattr(self, "prompt", None),
+                    approved,
+                )
+            )
         log_review(
             ReviewLog(
                 group_id=approved.group_id,
@@ -171,6 +188,126 @@ class ReviewCommandMixin:
             )
         )
         return f"✅ 已通过任务 #{approved.task_id}。\n{punishment_msg}"
+
+    async def _feedback_rule(self, task: "ReviewTask", approved: bool) -> None:
+        """将任务处理结果反馈给命中的规则（激活规则统计与熔断）。"""
+        rules = getattr(self, "rules", None)
+        if rules is None or not task.rule_id:
+            return
+        await rules.record_decision(task.rule_id, approved)
+
+    async def _handle_rule(self, event: AstrMessageEvent, sub: str) -> str:
+        """处理 /review rule 子命令（正则规则管理）。"""
+        rules = getattr(self, "rules", None)
+        if rules is None:
+            return "❌ 正则规则引擎未启用。"
+        raw = (getattr(event, "message_str", "") or "").strip()
+        prefix = "/review rule"
+        pos = raw.find(prefix)
+        rest = raw[pos + len(prefix):].strip() if pos != -1 else sub
+        parts = rest.split()
+        if not parts:
+            return self._rule_usage()
+        command = parts[0].lower()
+        if command == "list":
+            return self._format_rules(rules)
+        if command == "pending":
+            return self._format_candidates(rules)
+        if command == "approve" and len(parts) >= 2:
+            ok, message = await rules.approve_candidate(parts[1])
+            return ("✅ " if ok else "❌ ") + message
+        if command == "deny" and len(parts) >= 2:
+            ok = await rules.deny_candidate(parts[1])
+            return ("✅ 已拒绝候选 " if ok else "❌ 候选不存在：") + parts[1]
+        if command == "add":
+            return await self._rule_add(rules, parts[1:], rest)
+        if command == "del" and len(parts) >= 2:
+            ok = await rules.delete(parts[1])
+            return ("✅ 已删除规则 " if ok else "❌ 规则不存在：") + parts[1]
+        if command in ("disable", "enable") and len(parts) >= 2:
+            ok, message = await rules.set_enabled(
+                parts[1], enabled=(command == "enable")
+            )
+            return ("✅ " if ok else "❌ ") + message
+        return self._rule_usage()
+
+    async def _rule_add(self, rules: Any, parts: list[str], rest: str) -> str:
+        """添加一条手动规则：/review rule add <pattern> [level]。"""
+        if not parts:
+            return self._rule_usage()
+        level = 1
+        tokens = list(parts)
+        if tokens[-1].isdigit():
+            candidate = int(tokens[-1])
+            if 1 <= candidate <= 3:
+                level = candidate
+                tokens = tokens[:-1]
+        pattern = " ".join(tokens).strip()
+        if not pattern:
+            return "❌ 缺少正则表达式：/review rule add <pattern> [level]"
+        ok, message, _ = await rules.add(pattern, source="manual", level=level)
+        return ("✅ " if ok else "❌ ") + message
+
+    @staticmethod
+    def _format_rules(rules: Any) -> str:
+        """格式化规则列表。"""
+        records = rules.list()
+        if not records:
+            return "📋 当前没有正则规则。"
+        lines = [f"📋 正则规则（{len(records)}）："]
+        for rule in records:
+            accuracy = rule.accuracy * 100 if rule.approved + rule.rejected else None
+            stat = (
+                f"通过 {rule.approved}/拒绝 {rule.rejected}"
+                f"（准确率 {accuracy:.0f}%）"
+                if accuracy is not None
+                else f"命中 {rule.hits}"
+            )
+            lines.append(
+                f"#{rule.rule_id} [{rule.status.value}] "
+                f"L{rule.level} {rule.note or rule.pattern[:20]}"
+                f" | 来源 {rule.source} | {stat}"
+            )
+        lines.append(
+            "使用 /review rule add <pattern> [level] 添加，"
+            "/review rule disable|enable <id> 停用/启用，"
+            "/review rule del <id> 删除。"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_candidates(rules: Any) -> str:
+        """格式化待审批候选列表。"""
+        candidates = rules.candidates()
+        if not candidates:
+            return "📥 当前没有待审批的规则候选。"
+        lines = [f"📥 待审批规则候选（{len(candidates)}）："]
+        for candidate in candidates:
+            lines.append(
+                f"#{candidate.candidate_id} [{candidate.note or candidate.pattern}]"
+                f" L{candidate.level}（来源群 {candidate.group_id}，"
+                f"任务 {candidate.source_task_id}）"
+            )
+        lines.append(
+            "使用 /review rule approve <id> 批准（进入观察期），"
+            "/review rule deny <id> 拒绝。"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _rule_usage() -> str:
+        """正则规则命令用法。"""
+        return (
+            "🤖 正则规则管理（管理员）\n"
+            "/review rule list              查看规则列表\n"
+            "/review rule pending           查看待审批候选\n"
+            "/review rule approve <id>      批准候选（进入观察期）\n"
+            "/review rule deny <id>         拒绝候选\n"
+            "/review rule add <pattern> [level]  添加规则（1~3 级）\n"
+            "/review rule disable <id>      停用规则\n"
+            "/review rule enable <id>       启用规则\n"
+            "/review rule del <id>          删除规则"
+        )
 
     async def _record_decision(self, task: "ReviewTask", approved: bool) -> None:
         """记录管理员处理结果到违规统计（若已启用）。"""
@@ -264,6 +401,7 @@ class ReviewCommandMixin:
             "/review list      查看待审核任务\n"
             "/review stats     查看本群违规统计\n"
             "/review stats all 查看全部群统计\n"
+            "/review rule      管理正则规则（rule 查看详情）\n"
             "/review detail <id>   查看详情\n"
             "/review pass <id>     通过并执行处罚\n"
             "/review reject <id>   拒绝任务"
