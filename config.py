@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 DEFAULT_CONFIG: dict[str, Any] = {
     "history_count": 50,
     "review_mode": "both",
+    "enable_passive_review": True,
     "risk_threshold": 80,
     "review_timeout": 300,
     "cooldown": 300,

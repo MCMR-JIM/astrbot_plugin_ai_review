@@ -71,6 +71,8 @@ class ReviewWorkflow:
             return
         record = self._to_record(event, group_id)
         self.history.add(record)
+        if not bool(self._get_config().get("enable_passive_review", True)):
+            return
         if self._review_mode() not in ("passive", "both"):
             return
         skip, reason = self._should_skip(event)

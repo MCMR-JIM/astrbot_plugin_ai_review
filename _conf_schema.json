@@ -12,6 +12,12 @@
     "default": "both",
     "options": ["active", "passive", "both"]
   },
+  "enable_passive_review": {
+    "type": "bool",
+    "description": "启用被动自主审核",
+    "hint": "关闭后群消息仍会按 enable_history 缓存，但不再自动触发 AI 审核；主动 /review 命令不受影响",
+    "default": true
+  },
   "risk_threshold": {
     "type": "int",
     "description": "风险阈值",

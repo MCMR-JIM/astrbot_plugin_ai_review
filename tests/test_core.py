@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 import unittest
@@ -15,7 +16,10 @@ from pathlib import Path
 # 使模块内的相对导入（如 review.punishment 中的 ..models）能够解析。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from repo.config import ConfigManager  # noqa: E402
 from repo.models import ChatRecord, ReviewResult, ReviewTask  # noqa: E402
+from repo.prompt import PromptManager  # noqa: E402
+from repo.review.history import HistoryCache  # noqa: E402
 from repo.review.punishment import Punisher  # noqa: E402
 from repo.review.queue import ReviewQueue  # noqa: E402
 from repo.review.workflow import ReviewWorkflow  # noqa: E402
@@ -167,6 +171,117 @@ class TaskIdTest(unittest.TestCase):
             timeout=300,
         )
         self.assertEqual(len(task.task_id), 12)
+
+
+class _StubLLM:
+    """记录调用次数并返回固定审核结果的 LLM 桩。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, system: str, user: str, output: str, umo: str) -> str:
+        self.calls += 1
+        return (
+            '{"illegal": true, "risk": 95, "type": "测试", '
+            '"reason": "r", "evidence": ["e"], "suggestion": "mute"}'
+        )
+
+
+class _StubGroupEvent:
+    """满足 workflow.on_message 最小接口的群消息事件桩。"""
+
+    def __init__(self, sender_id: str = "10001", content: str = "测试消息") -> None:
+        self.message_obj = _FakeMessageObj(1700000000.0)
+        self.unified_msg_origin = "aiocqhttp:GroupMessage:g1"
+        self.role = "member"
+        self._sender_id = sender_id
+        self._content = content
+
+    def get_group_id(self) -> str:
+        return "g1"
+
+    def get_sender_id(self) -> str:
+        return self._sender_id
+
+    def get_sender_name(self) -> str:
+        return "测试用户"
+
+    def get_message_outline(self) -> str:
+        return self._content
+
+    def get_self_id(self) -> str:
+        return "bot"
+
+    def is_admin(self) -> bool:
+        return False
+
+    def get_platform_id(self) -> str:
+        return "aiocqhttp"
+
+
+class PassiveReviewToggleTest(unittest.TestCase):
+    def test_default_enabled(self) -> None:
+        cfg = ConfigManager({})
+        self.assertTrue(cfg.get("enable_passive_review", True))
+
+    def test_toggle_via_set_value(self) -> None:
+        cfg = ConfigManager({})
+        ok, _ = asyncio.run(cfg.set_value("enable_passive_review", "false"))
+        self.assertTrue(ok)
+        self.assertFalse(cfg.get("enable_passive_review", True))
+
+        ok, _ = asyncio.run(cfg.set_value("enable_passive_review", "true"))
+        self.assertTrue(ok)
+        self.assertTrue(cfg.get("enable_passive_review", False))
+
+
+class PassiveReviewWorkflowTest(unittest.TestCase):
+    @staticmethod
+    def _make_cfg(enabled: bool) -> dict:
+        return {
+            "enable_passive_review": enabled,
+            "enable_history": True,
+            "review_mode": "both",
+            "risk_threshold": 80,
+            "history_count": 50,
+            "whitelist": [],
+            "min_msg_len": 2,
+            "cooldown": 300,
+            "review_timeout": 300,
+            "max_chat_chars": 3000,
+            "max_msg_chars": 200,
+        }
+
+    @classmethod
+    def _make_workflow(cls, cfg: dict, llm: _StubLLM):
+        history = HistoryCache(lambda: cfg)
+        prompt = PromptManager(
+            str(Path(__file__).resolve().parent.parent),
+            lambda: cfg,
+        )
+        queue = ReviewQueue()
+        workflow = ReviewWorkflow(history, prompt, llm, queue, lambda: cfg)
+        return workflow, history, queue
+
+    def test_disabled_skips_review_but_caches(self) -> None:
+        llm = _StubLLM()
+        cfg = self._make_cfg(False)
+        workflow, history, _ = self._make_workflow(cfg, llm)
+
+        asyncio.run(workflow.on_message(_StubGroupEvent()))
+
+        self.assertEqual(llm.calls, 0)
+        self.assertEqual(len(history.get_recent("g1")), 1)
+
+    def test_enabled_triggers_review(self) -> None:
+        llm = _StubLLM()
+        cfg = self._make_cfg(True)
+        workflow, _, queue = self._make_workflow(cfg, llm)
+
+        asyncio.run(workflow.on_message(_StubGroupEvent()))
+
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(queue.pending_count, 1)
 
 
 if __name__ == "__main__":
