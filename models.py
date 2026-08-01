@@ -81,6 +81,27 @@ class ChatRecord:
         time_str = time.strftime("%m-%d %H:%M", time.localtime(self.timestamp))
         return f"{index}. [{time_str}] {self.nickname}({self.user_id}): {self.content}"
 
+    def to_dict(self) -> dict:
+        """序列化为字典（用于 KV 持久化）。"""
+        return {
+            "timestamp": self.timestamp,
+            "nickname": self.nickname,
+            "user_id": self.user_id,
+            "content": self.content,
+            "group_id": self.group_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ChatRecord":
+        """从字典恢复记录。"""
+        return cls(
+            timestamp=float(data.get("timestamp", 0)),
+            nickname=str(data.get("nickname", "")),
+            user_id=str(data.get("user_id", "")),
+            content=str(data.get("content", "")),
+            group_id=str(data.get("group_id", "")),
+        )
+
 
 @dataclass(slots=True)
 class ReviewResult:
@@ -137,6 +158,17 @@ class ReviewResult:
             evidence=evidence,
             suggestion=suggestion,
         )
+
+    def to_dict(self) -> dict:
+        """序列化为字典（用于 KV 持久化）。"""
+        return {
+            "illegal": self.illegal,
+            "risk": self.risk,
+            "type": self.type,
+            "reason": self.reason,
+            "evidence": list(self.evidence),
+            "suggestion": self.suggestion,
+        }
 
 
 @dataclass(slots=True)
@@ -208,6 +240,62 @@ class ReviewTask:
             expires_at=now + timeout,
             platform_id=platform_id,
             session_id=session_id,
+        )
+
+    def to_dict(self) -> dict:
+        """序列化为字典（用于 KV 持久化）。"""
+        return {
+            "task_id": self.task_id,
+            "group_id": self.group_id,
+            "user_id": self.user_id,
+            "nickname": self.nickname,
+            "result": self.result.to_dict(),
+            "context": [record.to_dict() for record in self.context],
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "status": self.status.value,
+            "admin_id": self.admin_id,
+            "decided_at": self.decided_at,
+            "platform_id": self.platform_id,
+            "session_id": self.session_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ReviewTask":
+        """从字典恢复任务（异常字段按默认值兜底）。"""
+        raw_status = data.get("status", ReviewStatus.PENDING.value)
+        try:
+            status = ReviewStatus(raw_status)
+        except ValueError:
+            status = ReviewStatus.PENDING
+        raw_result = data.get("result")
+        if isinstance(raw_result, dict):
+            result = ReviewResult.from_dict(raw_result)
+        else:
+            result = ReviewResult.from_dict(
+                {"illegal": False, "risk": 0, "type": "", "reason": ""}
+            )
+        raw_context = data.get("context") or []
+        context = [
+            ChatRecord.from_dict(item)
+            for item in raw_context
+            if isinstance(item, dict)
+        ]
+        raw_decided = data.get("decided_at")
+        return cls(
+            task_id=str(data.get("task_id", "")),
+            group_id=str(data.get("group_id", "")),
+            user_id=str(data.get("user_id", "")),
+            nickname=str(data.get("nickname", "")),
+            result=result,
+            context=context,
+            created_at=float(data.get("created_at", 0)),
+            expires_at=float(data.get("expires_at", 0)),
+            status=status,
+            admin_id=str(data.get("admin_id", "")),
+            decided_at=float(raw_decided) if raw_decided is not None else None,
+            platform_id=str(data.get("platform_id", "")),
+            session_id=str(data.get("session_id", "")),
         )
 
     @property

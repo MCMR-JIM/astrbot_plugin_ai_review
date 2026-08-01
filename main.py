@@ -18,9 +18,11 @@ from .commands.config import ConfigCommandMixin
 from .commands.review import ReviewCommandMixin
 from .config import ConfigManager
 from .prompt import PromptManager
+from .review.persistence import KVStore
 from .review.history import HistoryCache
 from .review.punishment import PlatformExecutor, Punisher
 from .review.queue import ReviewQueue
+from .review.stats import StatsStore
 from .review.workflow import ReviewWorkflow
 from .utils.llm import LLMClient
 from .utils.logger import get_logger
@@ -46,24 +48,35 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         """
         super().__init__(context, config)
         self._bg_tasks: set[asyncio.Task] = set()
+        self._kv = KVStore(self.get_kv_data, self.put_kv_data)
         self.config = ConfigManager(config if config else {})
         get_config = self._get_config
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
 
         self.history = HistoryCache(get_config)
         self.prompt = PromptManager(plugin_dir, get_config)
-        self.queue = ReviewQueue()
+        self.queue = ReviewQueue(store=self._kv, get_config=get_config)
         self.adapter = PimengBlacklistAdapter(context)
         self.llm = LLMClient(context, get_config, notifier=self._notify_admin)
+        self.stats = StatsStore(self._kv)
         self.workflow = ReviewWorkflow(
             self.history,
             self.prompt,
             self.llm,
             self.queue,
             get_config,
+            stats=self.stats,
+            store=self._kv,
         )
         self.executor = PlatformExecutor(context)
         self.punisher = Punisher(self.executor, self.adapter, get_config)
+
+    async def initialize(self) -> None:
+        """插件激活时从 KV 恢复持久化状态。"""
+        await self.config.load_overrides(self._kv)
+        await self.queue.load()
+        await self.stats.load()
+        await self.workflow.load_state()
 
     def _spawn(self, coro: Any) -> asyncio.Task:
         """以受管方式创建后台任务，避免任务被 GC 且异常静默丢失。"""
@@ -83,9 +96,9 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         if exc is not None:
             logger.error("[AI审核] 后台任务异常：%s", exc, exc_info=exc)
 
-    def _get_config(self) -> dict:
-        """返回当前配置字典（供各模块热加载）。"""
-        return self.config.raw
+    def _get_config(self, group_id: str = "") -> dict:
+        """返回当前配置字典（供各模块热加载，支持按群覆盖）。"""
+        return self.config.effective(group_id)
 
     async def _notify_admin(self, message: str) -> None:
         """向配置的管理员发送告警消息。

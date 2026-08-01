@@ -29,7 +29,42 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_chat_chars": 3000,
     "max_msg_chars": 200,
     "punish_pipeline": {},
+    "llm_temperature": 0.3,
+    "max_pending_per_user": 2,
+    "max_pending_total": 200,
 }
+
+# 数值型配置的合法范围（闭区间）；不在表中的键不做范围校验。
+_LIMITS: dict[str, tuple[float, float]] = {
+    "history_count": (1, 10000),
+    "risk_threshold": (0, 100),
+    "review_timeout": (1, 604800),
+    "cooldown": (0, 2592000),
+    "min_msg_len": (0, 10000),
+    "llm_max_concurrency": (1, 64),
+    "mute_duration": (0, 2592000),
+    "max_chat_chars": (0, 1000000),
+    "max_msg_chars": (0, 100000),
+    "llm_temperature": (0.0, 2.0),
+    "max_pending_per_user": (1, 100),
+    "max_pending_total": (1, 10000),
+}
+
+# 支持按群覆盖的配置项。
+_OVERRIDE_KEYS = frozenset(
+    {
+        "risk_threshold",
+        "review_mode",
+        "enable_passive_review",
+        "enable_history",
+        "cooldown",
+        "min_msg_len",
+        "punish_pipeline",
+        "mute_duration",
+        "max_chat_chars",
+        "max_msg_chars",
+    }
+)
 
 
 class ConfigManager:
@@ -46,9 +81,32 @@ class ConfigManager:
             config: AstrBot 传入的插件配置对象。
         """
         self._config = config
+        self._overrides: dict[str, dict[str, Any]] = {}
         for key, value in DEFAULT_CONFIG.items():
             if key not in config:
                 config[key] = value
+
+    @property
+    def overrides(self) -> dict[str, dict[str, Any]]:
+        """当前按群覆盖配置的副本。"""
+        return {
+            str(group_id): dict(values)
+            for group_id, values in self._overrides.items()
+        }
+
+    def effective(self, group_id: str = "") -> dict:
+        """返回指定群生效的配置（基础配置 + 群覆盖）。
+
+        Args:
+            group_id: 群号；为空时仅返回基础配置。
+        """
+        if not group_id:
+            return self._config
+        merged = dict(self._config)
+        overrides = self._overrides.get(str(group_id))
+        if overrides:
+            merged.update(overrides)
+        return merged
 
     @property
     def raw(self) -> dict:
@@ -97,6 +155,9 @@ class ConfigManager:
             "both",
         ):
             return False, "review_mode 只能是 active / passive / both 之一。"
+        limits = _LIMITS.get(key)
+        if limits is not None and not (limits[0] <= value <= limits[1]):
+            return False, f"配置项 {key} 的值需在 {limits[0]} ~ {limits[1]} 之间。"
         self._config[key] = value
         try:
             save = getattr(self._config, "save_config_async", None)
@@ -107,6 +168,71 @@ class ConfigManager:
         except Exception:
             return True, f"{key} = {value}（内存已生效，持久化失败）"
         return True, f"{key} = {value}"
+
+    async def load_overrides(self, store: Any) -> None:
+        """从 KV 恢复按群覆盖配置。"""
+        raw = await store.get("group_overrides", {})
+        if isinstance(raw, dict):
+            self._overrides = {
+                str(group_id): dict(values)
+                for group_id, values in raw.items()
+                if isinstance(values, dict)
+            }
+
+    async def _save_overrides(self, store: Any) -> None:
+        await store.put("group_overrides", self._overrides)
+
+    async def set_override(
+        self,
+        store: Any,
+        group_id: str,
+        key: str,
+        raw_value: str,
+    ) -> tuple[bool, str]:
+        """为指定群设置覆盖配置并持久化。"""
+        if key not in DEFAULT_CONFIG or key not in _OVERRIDE_KEYS:
+            supported = "、".join(sorted(_OVERRIDE_KEYS))
+            return False, f"该配置项不支持按群覆盖。支持：{supported}"
+        try:
+            value = self._convert(DEFAULT_CONFIG[key], raw_value)
+        except ValueError:
+            return False, f"配置项 {key} 的值类型错误。"
+        if key == "review_mode" and str(value).lower() not in (
+            "active",
+            "passive",
+            "both",
+        ):
+            return False, "review_mode 只能是 active / passive / both 之一。"
+        limits = _LIMITS.get(key)
+        if limits is not None and not (limits[0] <= value <= limits[1]):
+            return False, f"配置项 {key} 的值需在 {limits[0]} ~ {limits[1]} 之间。"
+        group_id = str(group_id)
+        self._overrides.setdefault(group_id, {})[key] = value
+        await self._save_overrides(store)
+        return True, f"群 {group_id} 的 {key} = {value}"
+
+    async def clear_override(
+        self,
+        store: Any,
+        group_id: str,
+        key: str | None = None,
+    ) -> tuple[bool, str]:
+        """清除指定群的覆盖配置（key 为空时清除全部）。"""
+        group_id = str(group_id)
+        if key is None:
+            if group_id not in self._overrides:
+                return False, f"群 {group_id} 没有覆盖配置。"
+            del self._overrides[group_id]
+            await self._save_overrides(store)
+            return True, f"已清除群 {group_id} 的全部覆盖配置。"
+        group_overrides = self._overrides.get(group_id)
+        if not group_overrides or key not in group_overrides:
+            return False, f"群 {group_id} 没有 {key} 的覆盖配置。"
+        del group_overrides[key]
+        if not group_overrides:
+            del self._overrides[group_id]
+        await self._save_overrides(store)
+        return True, f"已清除群 {group_id} 的 {key}。"
 
     @staticmethod
     def _convert(default: Any, raw: str) -> Any:
