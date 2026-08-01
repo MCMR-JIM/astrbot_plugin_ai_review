@@ -95,6 +95,54 @@ class PluginLifecycleTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_terminate_contains_managed_task_exceptions(self) -> None:
+        async def scenario() -> None:
+            plugin = object.__new__(AiReviewPlugin)
+            plugin._bg_tasks = set()
+            active_started = asyncio.Event()
+
+            async def fail() -> None:
+                raise RuntimeError("managed task failed")
+
+            async def active() -> None:
+                active_started.set()
+                await asyncio.Event().wait()
+
+            failed_task = asyncio.create_task(fail())
+            active_task = asyncio.create_task(active())
+            plugin._bg_tasks.update((failed_task, active_task))
+            await active_started.wait()
+            await asyncio.sleep(0)
+            self.assertTrue(failed_task.done())
+
+            await plugin.terminate()
+
+            self.assertIsInstance(failed_task.exception(), RuntimeError)
+            self.assertTrue(active_task.cancelled())
+
+        asyncio.run(scenario())
+
+    def test_terminate_cleans_up_tasks_created_by_spawn(self) -> None:
+        async def scenario() -> None:
+            plugin = object.__new__(AiReviewPlugin)
+            plugin._bg_tasks = set()
+            started = asyncio.Event()
+
+            async def worker() -> None:
+                started.set()
+                await asyncio.Event().wait()
+
+            task = plugin._spawn(worker())
+            await started.wait()
+
+            await plugin.terminate()
+
+            self.assertTrue(task.done())
+            self.assertTrue(task.cancelled())
+            self.assertEqual(plugin._bg_tasks, set())
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()
