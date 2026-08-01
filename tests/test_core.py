@@ -1116,6 +1116,43 @@ class ReviewContextTest(unittest.TestCase):
 
         self.assertEqual(captured, ["上下文已退出"])
 
+    def test_astrbot_logqueue_handler_format_ok(self) -> None:
+        """回归：AstrBot LogQueueHandler 的 Formatter 要求 plugin_tag 等字段，
+        缺失会导致插件加载崩溃（KeyError/ValueError）。"""
+        captured: list[str] = []
+        formatter = logging.Formatter(
+            "%(ansi_prefix)s[%(asctime)s.%(msecs)03d] %(plugin_tag)s "
+            "[%(short_levelname)s]%(astrbot_version_tag)s "
+            "[%(source_file)s:%(source_line)d]: %(message)s%(ansi_reset)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+        class _AnsiFilter(logging.Filter):
+            """模拟 AstrBot _QueueAnsiColorFilter（挂在 handler 上）。"""
+
+            def filter(self, record: logging.LogRecord) -> bool:
+                record.ansi_prefix = "\u001b[0m"
+                record.ansi_reset = "\u001b[0m"
+                return True
+
+        handler = logging.Handler()
+        handler.addFilter(_AnsiFilter())
+        handler.setFormatter(formatter)
+        handler.emit = lambda record: captured.append(formatter.format(record))
+
+        logger = get_logger()
+        logger.setLevel(logging.DEBUG)
+        logger.logger.addHandler(handler)
+        try:
+            with review_context(group_id="g1", user_id="u1"):
+                logger.info("审核日志")
+        finally:
+            logger.logger.removeHandler(handler)
+
+        self.assertEqual(len(captured), 1)
+        self.assertIn("g1", captured[0])
+        self.assertIn("审核日志", captured[0])
+
 
 if __name__ == "__main__":
     unittest.main()
