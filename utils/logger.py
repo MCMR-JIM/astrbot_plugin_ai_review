@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import os
 import time
 import uuid
 from contextlib import contextmanager
@@ -89,13 +90,69 @@ class _ContextAdapter(logging.LoggerAdapter):
         return f"[{' '.join(parts)}] {msg}", kwargs
 
 
+def _get_short_level(level_name: str) -> str:
+    """AstrBot 短级别名。"""
+    return {
+        "DEBUG": "DBUG",
+        "INFO": "INFO",
+        "WARNING": "WARN",
+        "ERROR": "ERRO",
+        "CRITICAL": "CRIT",
+    }.get(level_name, level_name[:4].upper())
+
+
+class _AstrBotCompatFilter(logging.Filter):
+    """为 record 补齐 AstrBot LogQueueHandler 格式化所需字段。
+
+    AstrBot 的 ``_RecordEnricherFilter`` 只会被挂到它内部 ``GetLogger`` /
+    ``get_plugin_logger`` 主动注册过的 logger 上；插件模块直接
+    ``logging.getLogger("astrbot.plugin.<name>")`` 获取的 logger 不会经过
+    该 filter，record 传播到 ``LogQueueHandler`` 时因缺少 ``plugin_tag``
+    等字段触发 ``ValueError``，导致插件加载崩溃。
+
+    本 filter 幂等地为 record 兜底注入这些字段，与 AstrBot 版本解耦。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "plugin_tag"):
+            record.plugin_tag = f"[{_PLUGIN_NAME}]"
+        if not hasattr(record, "short_levelname"):
+            record.short_levelname = _get_short_level(record.levelname)
+        if not hasattr(record, "astrbot_version_tag"):
+            record.astrbot_version_tag = (
+                "" if record.levelno < logging.WARNING else ""
+            )
+        if not hasattr(record, "source_file"):
+            record.source_file = _build_source_file(record.pathname)
+        if not hasattr(record, "source_line"):
+            record.source_line = record.lineno
+        if not hasattr(record, "is_trace"):
+            record.is_trace = record.name == "astrbot.trace"
+        return True
+
+
+def _build_source_file(pathname: str | None) -> str:
+    """从路径构造 ``目录.文件名`` 形式的源码标记。"""
+    if not pathname:
+        return "unknown"
+    dirname = os.path.dirname(pathname)
+    return (
+        os.path.basename(dirname) + "." + os.path.basename(pathname).replace(".py", "")
+    )
+
+
 def get_logger() -> "_ContextAdapter":
     """获取插件专用日志器（带上下文追踪的适配器）。
 
     Returns:
         日志适配器；各模块在模块顶部 ``logger = get_logger()`` 使用。
     """
-    return _ContextAdapter(logging.getLogger(_LOG_NAME))
+    logger = logging.getLogger(_LOG_NAME)
+    if not any(
+        isinstance(existing, _AstrBotCompatFilter) for existing in logger.filters
+    ):
+        logger.addFilter(_AstrBotCompatFilter())
+    return _ContextAdapter(logger)
 
 
 def log_review(entry: "ReviewLog") -> None:
