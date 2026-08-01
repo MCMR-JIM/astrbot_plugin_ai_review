@@ -46,25 +46,20 @@ AI 自动分析群成员聊天记录，为管理员生成审核建议（风险�
 
 群消息到达后，插件在后台任务中按以下流程处理：
 
-```mermaid
-flowchart TD
-    A["群消息到达"] --> B{"缓存开启 或<br/>review_mode 含 passive?"}
-    B -- 否 --> Z["不处理"]
-    B -- 是 --> C["后台任务 on_message"]
-    C --> D["HistoryCache 缓存该消息"]
-    D --> E{"review_mode 为 passive / both?"}
-    E -- 否 --> Z
-    E -- 是 --> F["前置过滤：<br/>机器人 / 管理员 / 白名单 / 冷却 / 过短消息"]
-    F -- 命中过滤 --> Z["跳过并记录 debug 日志"]
-    F -- 通过 --> G["组装 Prompt：<br/>system + user + output"]
-    G --> H["LLM 调用（并发限流）"]
-    H --> I{"JSON 解析成功?"}
-    I -- 失败 --> R["重试一次"]
-    R --> I
-    I -- 成功 --> J{"illegal 且<br/>risk >= risk_threshold?"}
-    J -- 否 --> Z
-    J -- 是 --> K["生成 ReviewTask 入队"]
-    K --> L["记录结构化日志<br/>等待管理员处理"]
+```text
+群消息到达
+├─ 缓存开启 或 review_mode 含 passive？
+│   ├─ 否 → 不处理
+│   └─ 是 → 后台任务 on_message → HistoryCache 缓存该消息
+│       └─ review_mode 为 passive / both？
+│           ├─ 否 → 不处理
+│           └─ 是 → 前置过滤（机器人 / 管理员 / 白名单 / 冷却 / 过短消息）
+│               ├─ 命中过滤 → 跳过并记录 debug 日志
+│               └─ 通过 → 组装 Prompt（system + user + output）→ LLM 调用（并发限流）
+│                   ├─ JSON 解析失败 → 重试一次（仍失败则结束本次审核）
+│                   └─ 解析成功 → illegal 且 risk >= risk_threshold？
+│                       ├─ 否 → 不处理
+│                       └─ 是 → 生成 ReviewTask 入队 → 记录结构化日志，等待管理员处理
 ```
 
 说明：
@@ -88,15 +83,11 @@ flowchart TD
 
 ### 审核任务状态机
 
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING: 命中违规，任务入队
-    PENDING --> APPROVED: 管理员 /review pass
-    PENDING --> REJECTED: 管理员 /review reject
-    PENDING --> EXPIRED: 超过 review_timeout 秒
-    APPROVED --> [*]: 执行处罚流水线
-    REJECTED --> [*]
-    EXPIRED --> [*]
+```text
+PENDING（待处理，命中违规后入队）
+├─ 管理员 /review pass <id>   → APPROVED（通过，执行处罚流水线）
+├─ 管理员 /review reject <id> → REJECTED（拒绝，仅记录日志）
+└─ 超过 review_timeout 秒     → EXPIRED（超时自动失效）
 ```
 
 - **通过**（`/review pass <id>`）：按 AI 建议的处罚类型执行整条处罚流水线，执行结果与审核日志一并记录；
