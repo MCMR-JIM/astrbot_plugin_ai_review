@@ -88,6 +88,15 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         await self.workflow.load_state()
         self._spawn(self._sediment_push_loop())
 
+    async def terminate(self) -> None:
+        """取消并等待插件管理的后台任务。"""
+        tasks = tuple(self._bg_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     @filter.command("review")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_review(
