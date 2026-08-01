@@ -72,6 +72,12 @@
     "hint": "同时进行的模型请求数上限",
     "default": 3
   },
+  "llm_temperature": {
+    "type": "float",
+    "description": "AI 采样温度",
+    "hint": "审核输出的一致性控制，0~2；建议保持低温度（默认 0.3）",
+    "default": 0.3
+  },
   "mute_duration": {
     "type": "int",
     "description": "禁言时长（秒）",
@@ -101,5 +107,17 @@
     "description": "处罚流水线映射",
     "hint": "示例：{\"mute\": [\"warn\", \"mute\"]}，键为建议处罚，值为有序阶段列表（warn/mute/kick/ban/blacklist）",
     "default": {}
+  },
+  "max_pending_per_user": {
+    "type": "int",
+    "description": "同一用户待审核任务上限",
+    "hint": "同一群内同一用户最多同时存在的待处理任务数，防止刷屏堆积",
+    "default": 2
+  },
+  "max_pending_total": {
+    "type": "int",
+    "description": "待审核任务总数上限",
+    "hint": "全局待处理任务数超过该值后拒绝新任务入队",
+    "default": 200
   }
 }

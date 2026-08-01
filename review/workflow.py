@@ -15,7 +15,9 @@ from ..prompt import PromptManager
 from ..utils.logger import get_logger, log_review
 from ..utils.parser import parse_review_result
 from .history import HistoryCache
+from .persistence import KVStore
 from .queue import ReviewQueue
+from .stats import StatsStore
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
@@ -37,7 +39,9 @@ class ReviewWorkflow:
         prompt: PromptManager,
         llm: Any,
         queue: ReviewQueue,
-        get_config: Callable[[], dict[str, Any]],
+        get_config: Callable[[str], dict[str, Any]],
+        stats: StatsStore | None = None,
+        store: KVStore | None = None,
     ) -> None:
         """初始化工作流。
 
@@ -46,14 +50,30 @@ class ReviewWorkflow:
             prompt: Prompt 组装器。
             llm: LLMClient 实例。
             queue: 审核任务队列。
-            get_config: 返回当前插件配置字典的回调。
+            get_config: 返回当前插件配置字典的回调，可接受群号参数。
+            stats: 违规统计存储（可选）。
+            store: KV 持久化存储（用于冷却表，可选）。
         """
         self.history = history
         self.prompt = prompt
         self.llm = llm
         self.queue = queue
         self._get_config = get_config
+        self._stats = stats
+        self._store = store
         self._cooldowns: dict[str, float] = {}
+
+    async def load_state(self) -> None:
+        """从 KV 恢复冷却表。"""
+        if self._store is None:
+            return
+        raw = await self._store.get("cooldowns", {})
+        if isinstance(raw, dict):
+            self._cooldowns = {
+                str(key): float(value)
+                for key, value in raw.items()
+                if isinstance(value, (int, float))
+            }
 
     # ---------- 公共入口 ----------
 
@@ -71,9 +91,11 @@ class ReviewWorkflow:
             return
         record = self._to_record(event, group_id)
         self.history.add(record)
-        if not bool(self._get_config().get("enable_passive_review", True)):
+        if not bool(
+            self._get_config(group_id).get("enable_passive_review", True)
+        ):
             return
-        if self._review_mode() not in ("passive", "both"):
+        if self._review_mode(group_id) not in ("passive", "both"):
             return
         skip, reason = self._should_skip(event)
         if skip:
@@ -141,7 +163,7 @@ class ReviewWorkflow:
         group_id = event.get_group_id()
         if not group_id:
             return None
-        config = self._get_config()
+        config = self._get_config(group_id)
         threshold = int(config.get("risk_threshold", 80))
 
         if target_user_id:
@@ -205,9 +227,21 @@ class ReviewWorkflow:
             platform_id=event.get_platform_id(),
             session_id=event.unified_msg_origin,
         )
-        self.queue.add(task)
+        if not await self.queue.add(task):
+            logger.warning(
+                "[AI审核] 任务入队被拒绝（队列已满或该用户待处理任务过多）：群=%s 用户=%s",
+                group_id,
+                target_user_id or "(整体)",
+            )
+            return None
         if target_user_id:
-            self._touch_cooldown(group_id, target_user_id)
+            await self._touch_cooldown(group_id, target_user_id)
+        if self._stats is not None:
+            await self._stats.record_violation(
+                group_id,
+                target_user_id,
+                result.type,
+            )
         log_review(
             ReviewLog(
                 group_id=group_id,
@@ -269,7 +303,7 @@ class ReviewWorkflow:
         role = str(getattr(event, "role", "member"))
         if role in _FILTER_ROLES or event.is_admin():
             return True, "管理员/群主"
-        config = self._get_config()
+        config = self._get_config(event.get_group_id())
         if sender_id in [str(u) for u in config.get("whitelist", [])]:
             return True, "白名单用户"
         if self._in_cooldown(event.get_group_id(), sender_id):
@@ -292,7 +326,7 @@ class ReviewWorkflow:
         """
         if not target_user_id or target_user_id == event.get_self_id():
             return True, "目标无效或为机器人"
-        config = self._get_config()
+        config = self._get_config(event.get_group_id())
         if target_user_id in [str(u) for u in config.get("whitelist", [])]:
             return True, "目标在白名单"
         if self._in_cooldown(event.get_group_id(), target_user_id):
@@ -313,14 +347,16 @@ class ReviewWorkflow:
         last = self._cooldowns.get(key)
         if last is None:
             return False
-        cooldown = int(self._get_config().get("cooldown", 300))
+        cooldown = int(self._get_config(group_id).get("cooldown", 300))
         return time.time() - last < cooldown
 
-    def _touch_cooldown(self, group_id: str, user_id: str) -> None:
+    async def _touch_cooldown(self, group_id: str, user_id: str) -> None:
         """记录用户最近的审核时间（设置冷却起点）。"""
         if len(self._cooldowns) > 1024:
             self._cleanup_cooldowns()
         self._cooldowns[self._cooldown_key(group_id, user_id)] = time.time()
+        if self._store is not None:
+            await self._store.put("cooldowns", self._cooldowns)
 
     def _cleanup_cooldowns(self) -> None:
         """清理已过期的冷却记录，避免字典无限增长。"""
@@ -336,9 +372,9 @@ class ReviewWorkflow:
     def _cooldown_key(group_id: str, user_id: str) -> str:
         return f"{group_id}:{user_id}"
 
-    def _review_mode(self) -> str:
-        """当前触发模式。"""
-        return str(self._get_config().get("review_mode", "both"))
+    def _review_mode(self, group_id: str = "") -> str:
+        """当前触发模式（支持按群覆盖）。"""
+        return str(self._get_config(group_id).get("review_mode", "both"))
 
     # ---------- 辅助 ----------
 

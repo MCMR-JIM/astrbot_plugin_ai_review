@@ -54,7 +54,11 @@ class ReviewCommandMixin:
         if cmd == "recent":
             yield event.plain_result(await self._review_recent(event))
         elif cmd == "list":
-            yield event.plain_result(self._format_list(event))
+            yield event.plain_result(await self._format_list(event))
+        elif cmd == "stats":
+            yield event.plain_result(
+                await self._format_stats(event, (sub or "").strip())
+            )
         elif cmd in ("detail", "pass", "reject"):
             yield event.plain_result(await self._handle_task(event, cmd, (sub or "").strip()))
         elif cmd.isdigit():
@@ -102,9 +106,9 @@ class ReviewCommandMixin:
 
     # ---------- 队列管理 ----------
 
-    def _format_list(self, event: AstrMessageEvent) -> str:
+    async def _format_list(self, event: AstrMessageEvent) -> str:
         """格式化待审核任务列表。"""
-        tasks = self.queue.list_pending(event.get_group_id())
+        tasks = await self.queue.list_pending(event.get_group_id())
         if not tasks:
             return "📋 当前没有待审核任务。"
         lines = [f"📋 待审核任务（{len(tasks)}）："]
@@ -124,18 +128,19 @@ class ReviewCommandMixin:
         if not task_id:
             return f"❌ 请提供任务 ID：/review {cmd} <id>"
         if cmd == "detail":
-            task = self.queue.get(task_id)
+            task = await self.queue.get(task_id)
             if task is None:
                 return "❌ 任务不存在或已过期。"
             return self._format_detail(task)
         if cmd == "pass":
-            task = self.queue.get(task_id)
+            task = await self.queue.get(task_id)
             if task is None:
                 return "❌ 任务不存在或已过期。"
             return await self._approve_task(event, task)
-        task = self.queue.reject(task_id, event.get_sender_id())
+        task = await self.queue.reject(task_id, event.get_sender_id())
         if task is None:
             return "❌ 任务不存在或已处理。"
+        await self._record_decision(task, approved=False)
         log_review(
             ReviewLog(
                 group_id=task.group_id,
@@ -150,10 +155,11 @@ class ReviewCommandMixin:
     async def _approve_task(self, event: AstrMessageEvent, task: "ReviewTask") -> str:
         """通过任务并执行处罚。"""
         admin_id = event.get_sender_id()
-        approved = self.queue.approve(task.task_id, admin_id)
+        approved = await self.queue.approve(task.task_id, admin_id)
         if approved is None:
             return "❌ 任务已处理或已过期。"
         punishment_msg = await self._execute_punishment(approved, admin_id)
+        await self._record_decision(approved, approved=True)
         log_review(
             ReviewLog(
                 group_id=approved.group_id,
@@ -165,6 +171,50 @@ class ReviewCommandMixin:
             )
         )
         return f"✅ 已通过任务 #{approved.task_id}。\n{punishment_msg}"
+
+    async def _record_decision(self, task: "ReviewTask", approved: bool) -> None:
+        """记录管理员处理结果到违规统计（若已启用）。"""
+        stats = getattr(self, "stats", None)
+        if stats is None:
+            return
+        await stats.record_decision(
+            task.group_id,
+            task.user_id,
+            approved,
+            task.result.suggestion if approved else "",
+        )
+
+    async def _format_stats(self, event: AstrMessageEvent, target: str) -> str:
+        """格式化违规统计。"""
+        stats = getattr(self, "stats", None)
+        if stats is None:
+            return "（未启用违规统计）"
+        if target == "all":
+            summary = stats.all_summary()
+            if not summary:
+                return "📊 暂无统计数据。"
+            lines = ["📊 各群违规统计："]
+            for group_id, rows in summary.items():
+                lines.append(f"群 {group_id}：")
+                for row in rows[:5]:
+                    lines.append(
+                        f"  {row['user_id']}：违规 {row['count']} 次"
+                        f"（通过 {row['approved']} / 拒绝 {row['rejected']}）"
+                    )
+            return "\n".join(lines)
+        group_id = target or event.get_group_id()
+        rows = stats.group_summary(group_id)
+        if not rows:
+            return f"📊 群 {group_id} 暂无统计数据。"
+        lines = [f"📊 群 {group_id} 违规统计："]
+        for row in rows[:10]:
+            types = "、".join(f"{k}x{v}" for k, v in row["types"].items())
+            lines.append(
+                f"{row['user_id']}：违规 {row['count']} 次"
+                f" | 通过 {row['approved']} | 拒绝 {row['rejected']}"
+                + (f" | 类型 {types}" if types else "")
+            )
+        return "\n".join(lines)
 
     async def _execute_punishment(
         self,
@@ -212,6 +262,8 @@ class ReviewCommandMixin:
             "/review auto on   开启被动自主审核\n"
             "/review auto off  关闭被动自主审核\n"
             "/review list      查看待审核任务\n"
+            "/review stats     查看本群违规统计\n"
+            "/review stats all 查看全部群统计\n"
             "/review detail <id>   查看详情\n"
             "/review pass <id>     通过并执行处罚\n"
             "/review reject <id>   拒绝任务"

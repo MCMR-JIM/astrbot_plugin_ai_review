@@ -1,127 +1,174 @@
-"""审核任务队列（内存）。
-
-支持：查看待审核、查看详情、通过、拒绝、超时自动失效。
-审核记录保留日志（由 workflow 负责落日志）。
-"""
+"""审核任务队列（内存 + KV 持久化）。"""
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from typing import Any
+
 from ..models import ReviewStatus, ReviewTask
+from .persistence import KVStore
 
 
 class ReviewQueue:
     """审核任务队列。
 
-    全部存储于内存，key 为任务 ID。
+    任务以 task_id 为键保存在内存，并通过 KVStore 持久化（可选），
+    插件重启后可由 load() 恢复。所有变更操作均为异步。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        store: KVStore | None = None,
+        get_config: Callable[[str], dict[str, Any]] | None = None,
+    ) -> None:
+        """初始化队列。
+
+        Args:
+            store: KV 持久化存储，为 None 时不持久化。
+            get_config: 配置回调（用于读取队列上限），可接受群号参数。
+        """
         self._tasks: dict[str, ReviewTask] = {}
+        self._store = store
+        self._get_config = get_config
+        self._lock = asyncio.Lock()
 
-    @property
-    def pending_count(self) -> int:
-        """当前待处理任务数。"""
-        self.cleanup_expired()
-        return len(self._pending())
+    async def load(self) -> None:
+        """从 KV 恢复任务并清理已过期项。"""
+        if self._store is None:
+            return
+        raw = await self._store.get("review_tasks", {})
+        if not isinstance(raw, dict):
+            return
+        async with self._lock:
+            tasks: dict[str, ReviewTask] = {}
+            for task_id, data in raw.items():
+                if not isinstance(data, dict):
+                    continue
+                try:
+                    tasks[str(task_id)] = ReviewTask.from_dict(data)
+                except Exception:
+                    continue
+            self._tasks = tasks
+            await self._cleanup_locked()
 
-    def add(self, task: ReviewTask) -> None:
-        """添加一条审核任务。
+    async def _save(self) -> None:
+        if self._store is None:
+            return
+        snapshot = {
+            task_id: task.to_dict()
+            for task_id, task in self._tasks.items()
+        }
+        await self._store.put("review_tasks", snapshot)
 
-        Args:
-            task: 审核任务。
-        """
-        self._tasks[task.task_id] = task
+    async def add(self, task: ReviewTask) -> bool:
+        """添加任务；超过队列上限或同用户待处理上限时返回 False。"""
+        async with self._lock:
+            if self._over_limit(task):
+                return False
+            self._tasks[task.task_id] = task
+            await self._save()
+            return True
 
-    def get(self, task_id: str) -> ReviewTask | None:
-        """按 ID 获取任务（含过期清理）。
+    def _over_limit(self, task: ReviewTask) -> bool:
+        if self._get_config is None:
+            return False
+        config = self._get_config(task.group_id)
+        max_total = int(config.get("max_pending_total", 200))
+        max_per_user = int(config.get("max_pending_per_user", 2))
+        if len(self._tasks) >= max_total:
+            return True
+        same_user = sum(
+            1
+            for item in self._tasks.values()
+            if item.status is ReviewStatus.PENDING
+            and item.user_id
+            and item.user_id == task.user_id
+            and item.group_id == task.group_id
+        )
+        return same_user >= max_per_user
 
-        Args:
-            task_id: 任务 ID。
+    async def get(self, task_id: str) -> ReviewTask | None:
+        """按 ID 获取任务（含过期清理）。"""
+        async with self._lock:
+            await self._cleanup_locked()
+            return self._tasks.get(task_id)
 
-        Returns:
-            任务对象；不存在时返回 None。
-        """
-        self.cleanup_expired()
-        task = self._tasks.get(task_id)
-        return task
+    async def list_pending(self, group_id: str | None = None) -> list[ReviewTask]:
+        """列出待处理任务，按创建时间升序。"""
+        async with self._lock:
+            await self._cleanup_locked()
+            return self._pending_locked(group_id)
 
-    def list_pending(self, group_id: str | None = None) -> list[ReviewTask]:
-        """列出待处理任务，按创建时间升序。
+    async def list_all(self, group_id: str | None = None) -> list[ReviewTask]:
+        """列出全部任务（含已处理），按创建时间升序。"""
+        async with self._lock:
+            tasks = [
+                task
+                for task in self._tasks.values()
+                if not group_id or task.group_id == group_id
+            ]
+            tasks.sort(key=lambda task: task.created_at)
+            return tasks
 
-        Args:
-            group_id: 指定群号时只返回该群任务。
+    async def approve(
+        self,
+        task_id: str,
+        admin_id: str,
+    ) -> ReviewTask | None:
+        """通过一条待处理任务。"""
+        async with self._lock:
+            await self._cleanup_locked()
+            task = self._tasks.get(task_id)
+            if task is None or task.status is not ReviewStatus.PENDING:
+                return None
+            task.approve(admin_id)
+            await self._save()
+            return task
 
-        Returns:
-            待处理任务列表。
-        """
-        self.cleanup_expired()
-        return self._pending(group_id)
+    async def reject(
+        self,
+        task_id: str,
+        admin_id: str,
+    ) -> ReviewTask | None:
+        """拒绝一条待处理任务。"""
+        async with self._lock:
+            await self._cleanup_locked()
+            task = self._tasks.get(task_id)
+            if task is None or task.status is not ReviewStatus.PENDING:
+                return None
+            task.reject(admin_id)
+            await self._save()
+            return task
 
-    def list_all(self, group_id: str | None = None) -> list[ReviewTask]:
-        """列出全部任务，按创建时间升序。
+    async def cleanup_expired(self) -> list[ReviewTask]:
+        """清理已超时的待处理任务。"""
+        async with self._lock:
+            return await self._cleanup_locked()
 
-        Args:
-            group_id: 指定群号时只返回该群任务。
+    async def pending_count(self) -> int:
+        """当前待处理任务数（先清理过期）。"""
+        async with self._lock:
+            await self._cleanup_locked()
+            return len(self._pending_locked())
 
-        Returns:
-            全部任务列表。
-        """
-        tasks = [t for t in self._tasks.values() if not group_id or t.group_id == group_id]
-        tasks.sort(key=lambda t: t.created_at)
-        return tasks
-
-    def approve(self, task_id: str, admin_id: str) -> ReviewTask | None:
-        """通过一条待处理任务。
-
-        Args:
-            task_id: 任务 ID。
-            admin_id: 处理的管理员 ID。
-
-        Returns:
-            更新后的任务；不存在或已处理时返回 None。
-        """
-        task = self.get(task_id)
-        if task is None or task.status is not ReviewStatus.PENDING:
-            return None
-        task.approve(admin_id)
-        return task
-
-    def reject(self, task_id: str, admin_id: str) -> ReviewTask | None:
-        """拒绝一条待处理任务。
-
-        Args:
-            task_id: 任务 ID。
-            admin_id: 处理的管理员 ID。
-
-        Returns:
-            更新后的任务；不存在或已处理时返回 None。
-        """
-        task = self.get(task_id)
-        if task is None or task.status is not ReviewStatus.PENDING:
-            return None
-        task.reject(admin_id)
-        return task
-
-    def cleanup_expired(self) -> list[ReviewTask]:
-        """清理已超时的待处理任务。
-
-        Returns:
-            本次被标记为失效的任务列表。
-        """
+    async def _cleanup_locked(self) -> list[ReviewTask]:
         expired = []
         for task in list(self._tasks.values()):
             if task.status is ReviewStatus.PENDING and task.is_expired:
                 task.mark_expired()
                 expired.append(task)
                 self._tasks.pop(task.task_id, None)
+        if expired:
+            await self._save()
         return expired
 
-    def _pending(self, group_id: str | None = None) -> list[ReviewTask]:
-        """按创建时间升序返回待处理任务。"""
+    def _pending_locked(self, group_id: str | None = None) -> list[ReviewTask]:
         tasks = [
-            t
-            for t in self._tasks.values()
-            if t.status is ReviewStatus.PENDING and (not group_id or t.group_id == group_id)
+            task
+            for task in self._tasks.values()
+            if task.status is ReviewStatus.PENDING
+            and (not group_id or task.group_id == group_id)
         ]
-        tasks.sort(key=lambda t: t.created_at)
+        tasks.sort(key=lambda task: task.created_at)
         return tasks

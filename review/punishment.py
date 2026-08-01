@@ -308,11 +308,11 @@ class Punisher:
         self._pipelines: dict[str, list[str]] = dict(DEFAULT_PIPELINES)
         self._sync_config()
 
-    def _sync_config(self) -> None:
-        """同步处罚相关配置（支持热加载）。"""
+    def _sync_config(self, group_id: str = "") -> None:
+        """同步处罚相关配置（支持热加载与按群覆盖）。"""
         if self._get_config is None:
             return
-        config = self._get_config()
+        config = self._get_config(group_id)
         self._blacklist_enabled = bool(config.get("enable_blacklist", False))
         mute_duration = int(config.get("mute_duration", 600))
         if mute_duration != self._mute_duration:
@@ -345,7 +345,7 @@ class Punisher:
         Returns:
             各阶段执行结果汇总。
         """
-        self._sync_config()
+        self._sync_config(task.group_id)
         stage_names = self._pipelines.get(task.result.suggestion) or [
             task.result.suggestion
         ]

@@ -13,10 +13,15 @@ AI 自动分析群成员聊天记录，为管理员生成审核建议（风险�
 - **被动自主审核**：收到群消息后后台自动分析（可配置触发模式，不阻塞消息响应），支持独立开关
 - **被动审核开关**：可在配置面板或 `/review auto on|off` 命令中随时开关被动自主审核
 - **审核队列**：待审核列表 / 详情 / 通过 / 拒绝，超时自动失效
+- **数据持久化**：待审核任务、冷却表、违规统计与按群配置通过 AstrBot 官方 KV 存储持久化，重启不丢
+- **队列治理**：同一用户待处理任务数与全局队列总量可配置上限，防止刷屏堆积
+- **违规统计**：`/review stats` 查看按群/按用户的违规次数、类型与处理结果
+- **按群配置覆盖**：不同群可独立设置阈值、开关与处罚参数（`/reviewconfig group`）
 - **处罚策略**：warn / mute / kick / ban / blacklist，流水线模式，可配置扩展
 - **皮梦云黑库同步**：通过皮梦云黑库插件同步，未安装时自动跳过（弱依赖）
 - **全异步**：被动审核以后台任务执行，任务异常有日志可查
 - **配置热加载**：配置修改后即时生效（含处罚配置）
+- **LLM 调用加固**：网络失败自动退避重试，采样温度可配置（默认 0.3 保证一致性）
 - **Prompt 外置**：审核规则与提示词独立存放于文本文件，可热加载
 - **零第三方依赖**：仅使用 AstrBot 平台 API
 
@@ -157,6 +162,13 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 因此 `history_count`、`review_mode`、`risk_threshold`、`cooldown`、`punish_pipeline`、
 `mute_duration`、`enable_blacklist`、Prompt 目录等修改后**即时生效**，无需重启插件。
 
+### 持久化
+
+待审核任务队列、冷却表、违规统计与按群覆盖配置均通过 AstrBot 官方插件 KV 存储
+（`put_kv_data` / `get_kv_data`）持久化；插件激活（`initialize`）时自动恢复，
+重启后待处理任务不会丢失。任务数据支持 `max_pending_per_user` / `max_pending_total`
+上限治理，超过上限的新任务会被拒绝并记录日志。
+
 ## 配置（后端配置操作）
 
 ### 配置方式一：AstrBot 管理面板（推荐）
@@ -218,11 +230,14 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 | `whitelist` | list | [] | 白名单用户 ID，不参与自动审核 |
 | `min_msg_len` | int | 2 | 短于该长度的消息不触发被动审核 |
 | `llm_max_concurrency` | int | 3 | 同时进行的模型请求数上限（最小 1） |
+| `llm_temperature` | float | 0.3 | AI 采样温度（0~2），建议保持低温度保证审核一致性 |
 | `mute_duration` | int | 600 | mute 处罚禁言时长（秒） |
 | `admin_qq` | list | [] | AI 调用异常时向其发送告警私聊的管理员 QQ |
 | `max_chat_chars` | int | 3000 | 发送给 AI 的聊天记录总字符预算，超出丢弃更早的记录 |
 | `max_msg_chars` | int | 200 | 单条消息发送给 AI 的字符上限，超出截断 |
 | `punish_pipeline` | object | {} | 处罚流水线映射（键为建议处罚，值为有序阶段列表） |
+| `max_pending_per_user` | int | 2 | 同一群内同一用户最多同时存在的待处理任务数 |
+| `max_pending_total` | int | 200 | 全局待处理任务总数上限 |
 
 ### 常见配置场景
 
@@ -232,6 +247,7 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 - **降低误报**：`risk_threshold=85` 或调高 `min_msg_len`、增加白名单
 - **提高敏感度**：`risk_threshold=70`
 - **避免同一用户频繁触发**：调大 `cooldown`
+- **某群单独放宽/收紧**：`/reviewconfig group <群号> risk_threshold 85`（支持阈值、模式、被动开关、冷却、处罚参数等）
 - **自定义处罚**：`punish_pipeline={"kick": ["warn", "kick"]}`
 - **接入皮梦云黑库**：`enable_blacklist=true`，并确保皮梦云插件已启用且配置了 Bot Token
 - **管理员告警**：`admin_qq=["10000"]`（AI 调用失败时私聊通知）
@@ -246,11 +262,14 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 | `/review auto on` | 开启被动自主审核 |
 | `/review auto off` | 关闭被动自主审核 |
 | `/review list` | 查看待审核任务（最多 10 条） |
+| `/review stats` | 查看本群违规统计 |
+| `/review stats all` | 查看全部群违规统计 |
 | `/review detail <id>` | 查看任务详情（证据、聊天上下文） |
 | `/review pass <id>` | 通过任务并执行处罚流水线 |
 | `/review reject <id>` | 拒绝任务（不处罚，仅记录日志） |
 | `/reviewconfig` | 查看全部配置 |
 | `/reviewconfig <key> <value>` | 修改配置并持久化 |
+| `/reviewconfig group <群号> [key value\|reset]` | 查看 / 设置 / 清除按群覆盖配置 |
 
 ## 目录结构
 
@@ -261,8 +280,10 @@ models.py            数据模型（dataclass：ChatRecord / ReviewResult / Revi
 prompt.py            Prompt 构建与热加载
 review/
   history.py         聊天记录缓存（deque）
+  persistence.py     KV 持久化适配层（封装 AstrBot 官方插件存储）
+  stats.py           违规统计存储（KV 持久化）
   workflow.py        审核工作流（过滤 / 调用 / 解析 / 入队）
-  queue.py           审核任务队列（超时失效）
+  queue.py           审核任务队列（超时失效、KV 持久化、容量治理）
   punishment.py      处罚策略与流水线（Strategy 模式）
 commands/
   review.py          /review 命令
