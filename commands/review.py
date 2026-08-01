@@ -3,6 +3,7 @@
 命令（均为管理员权限）：
 - /review @成员 | uid：主动审核指定用户
 - /review recent：审核最近聊天记录
+- /review provider：列出 AstrBot 已接入的模型
 - /review list：查看待审核任务
 - /review detail <id>：查看任务详情
 - /review pass <id>：通过并执行处罚
@@ -53,6 +54,8 @@ class ReviewCommandMixin:
             return
         if cmd == "recent":
             yield event.plain_result(await self._review_recent(event))
+        elif cmd == "provider":
+            yield event.plain_result(self._format_providers())
         elif cmd == "list":
             yield event.plain_result(await self._format_list(event))
         elif cmd == "stats":
@@ -109,6 +112,35 @@ class ReviewCommandMixin:
         )
 
     # ---------- 队列管理 ----------
+
+    def _format_providers(self) -> str:
+        """列出 AstrBot 已接入的对话模型及当前审核使用的 Provider。"""
+        context = getattr(self, "context", None)
+        lines = ["🤖 AstrBot 已接入的对话模型："]
+        try:
+            providers = context.get_all_providers() if context else []
+        except Exception:
+            providers = []
+        if not providers:
+            lines.append("（未获取到可用模型，请检查 AstrBot 模型配置）")
+        current_id = ""
+        try:
+            current = context.get_using_provider() if context else None
+            current_id = current.meta().id if current else ""
+        except Exception:
+            pass
+        for provider in providers:
+            try:
+                meta = provider.meta()
+            except Exception:
+                continue
+            mark = " 👈 当前审核使用" if meta.id == current_id else ""
+            lines.append(f"• {meta.id}（{meta.model}）{mark}")
+        lines.append(
+            "固定审核模型：/reviewconfig llm_provider_id <Provider ID>；"
+            "留空则跟随会话默认模型（/provider 切换）。"
+        )
+        return "\n".join(lines)
 
     async def _format_list(self, event: AstrMessageEvent) -> str:
         """格式化待审核任务列表。"""
@@ -394,6 +426,7 @@ class ReviewCommandMixin:
             "/review @成员     审核指定成员\n"
             "/review <uid>     审核指定 QQ\n"
             "/review recent    审核最近聊天\n"
+            "/review provider  查看可用模型\n"
             "/review auto on   开启被动自主审核\n"
             "/review auto off  关闭被动自主审核\n"
             "/review list      查看待审核任务\n"

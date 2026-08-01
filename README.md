@@ -231,6 +231,7 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 | `whitelist` | list | [] | 白名单用户 ID，不参与自动审核 |
 | `min_msg_len` | int | 2 | 短于该长度的消息不触发被动审核 |
 | `llm_max_concurrency` | int | 3 | 同时进行的模型请求数上限（最小 1） |
+| `llm_provider_id` | string | 空 | 固定审核使用的 AstrBot 模型 Provider ID；留空跟随会话默认模型（`/provider` 切换） |
 | `llm_temperature` | float | 0.3 | AI 采样温度（0~2），建议保持低温度保证审核一致性 |
 | `mute_duration` | int | 600 | mute 处罚禁言时长（秒） |
 | `admin_qq` | list | [] | AI 调用异常时向其发送告警私聊的管理员 QQ |
@@ -250,6 +251,7 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 - **避免同一用户频繁触发**：调大 `cooldown`
 - **某群单独放宽/收紧**：`/reviewconfig group <群号> risk_threshold 85`（支持阈值、模式、被动开关、冷却、处罚参数等）
 - **自定义处罚**：`punish_pipeline={"kick": ["warn", "kick"]}`
+- **固定审核模型**：`/review provider` 查看已接入的模型，`/reviewconfig llm_provider_id <Provider ID>` 固定审核使用的模型；留空则跟随会话默认模型
 - **接入皮梦云黑库**：`enable_blacklist=true`，并确保皮梦云插件已启用且配置了 Bot Token
 - **管理员告警**：`admin_qq=["10000"]`（AI 调用失败时私聊通知）
 
@@ -260,6 +262,7 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 | `/review @成员` | 审核指定群成员（@ 提及） |
 | `/review <uid>` | 审核指定 QQ / 平台用户 ID |
 | `/review recent` | 审核最近整段聊天记录 |
+| `/review provider` | 列出 AstrBot 已接入的对话模型 |
 | `/review auto on` | 开启被动自主审核 |
 | `/review auto off` | 关闭被动自主审核 |
 | `/review list` | 查看待审核任务（最多 10 条） |

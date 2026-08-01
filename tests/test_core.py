@@ -571,11 +571,22 @@ class _Resp:
 
 
 class _StubProvider:
-    def __init__(self, failures: int = 0, temperature_error: bool = False) -> None:
+    def __init__(
+        self,
+        failures: int = 0,
+        temperature_error: bool = False,
+        provider_id: str = "stub",
+        model: str = "stub-model",
+    ) -> None:
         self.calls = 0
         self.failures = failures
         self.temperature_error = temperature_error
         self.last_kwargs: dict = {}
+        self._provider_id = provider_id
+        self._model = model
+
+    def meta(self):
+        return types.SimpleNamespace(id=self._provider_id, model=self._model)
 
     async def text_chat(self, **kwargs):
         self.calls += 1
@@ -590,11 +601,25 @@ class _StubProvider:
 
 
 class _StubContext:
-    def __init__(self, provider: _StubProvider) -> None:
+    def __init__(
+        self,
+        provider: _StubProvider,
+        providers: list | None = None,
+    ) -> None:
         self.provider = provider
+        self._providers = providers if providers is not None else [provider]
 
     def get_using_provider(self, umo: str):
         return self.provider
+
+    def get_all_providers(self):
+        return list(self._providers)
+
+    def get_provider_by_id(self, provider_id: str):
+        for prov in self._providers:
+            if prov.meta().id == provider_id:
+                return prov
+        return None
 
 
 class LLMClientRetryTest(unittest.TestCase):
@@ -643,6 +668,64 @@ class LLMClientRetryTest(unittest.TestCase):
         self.assertEqual(text, "ok")
         self.assertEqual(provider.calls, 2)
         self.assertNotIn("temperature", provider.last_kwargs)
+
+
+class LLMProviderSelectionTest(unittest.TestCase):
+    @staticmethod
+    def _client(
+        context: _StubContext,
+        cfg: dict,
+    ) -> LLMClient:
+        return LLMClient(
+            context,
+            lambda gid="": cfg,
+            retry_times=0,
+            retry_delays=(0.0,),
+        )
+
+    def test_uses_configured_provider_id(self) -> None:
+        session = _StubProvider(provider_id="session-model")
+        pinned = _StubProvider(provider_id="pinned-model")
+        context = _StubContext(session, providers=[session, pinned])
+        client = self._client(context, {"llm_provider_id": "pinned-model"})
+        text = asyncio.run(client.chat("s", "u", "o", "umo"))
+        self.assertEqual(text, "ok")
+        self.assertEqual(pinned.calls, 1)
+        self.assertEqual(session.calls, 0)
+
+    def test_falls_back_when_provider_id_unknown(self) -> None:
+        session = _StubProvider(provider_id="session-model")
+        context = _StubContext(session, providers=[session])
+        client = self._client(context, {"llm_provider_id": "ghost"})
+        text = asyncio.run(client.chat("s", "u", "o", "umo"))
+        self.assertEqual(text, "ok")
+        self.assertEqual(session.calls, 1)
+
+    def test_empty_provider_id_uses_session_model(self) -> None:
+        session = _StubProvider(provider_id="session-model")
+        context = _StubContext(session, providers=[session])
+        client = self._client(context, {"llm_provider_id": ""})
+        text = asyncio.run(client.chat("s", "u", "o", "umo"))
+        self.assertEqual(text, "ok")
+        self.assertEqual(session.calls, 1)
+
+    def test_context_without_provider_lookup_falls_back(self) -> None:
+        """旧版/精简 Context 缺少 get_provider_by_id 时仍回退会话默认。"""
+        session = _StubProvider(provider_id="session-model")
+
+        class _MinimalContext:
+            def get_using_provider(self, umo: str):
+                return session
+
+        client = LLMClient(
+            _MinimalContext(),
+            lambda gid="": {"llm_provider_id": "pinned"},
+            retry_times=0,
+            retry_delays=(0.0,),
+        )
+        text = asyncio.run(client.chat("s", "u", "o", "umo"))
+        self.assertEqual(text, "ok")
+        self.assertEqual(session.calls, 1)
 
 
 class PromptContentTest(unittest.TestCase):
