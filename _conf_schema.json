@@ -119,5 +119,60 @@
     "description": "待审核任务总数上限",
     "hint": "全局待处理任务数超过该值后拒绝新任务入队",
     "default": 200
+  },
+  "enable_regex_prefilter": {
+    "type": "bool",
+    "description": "启用正则预筛选",
+    "hint": "命中已激活规则的消息跳过 LLM 直接生成审核任务，节省 token；规则由 /review rule 管理",
+    "default": true
+  },
+  "regex_sediment": {
+    "type": "bool",
+    "description": "启用规则自动沉淀",
+    "hint": "管理员通过 AI 审核任务后，自动尝试将违规模式提炼为正则规则（进入观察期）",
+    "default": true
+  },
+  "regex_min_hits": {
+    "type": "int",
+    "description": "规则激活/熔断所需最小判定次数",
+    "hint": "观察期累计达到该次数后按准确率决定激活或删除；激活后累计该次数且准确率不足则自动停用",
+    "default": 5
+  },
+  "regex_min_accuracy": {
+    "type": "float",
+    "description": "规则最低准确率",
+    "hint": "0~1；判定准确率（通过/通过+拒绝）低于该值自动停用规则",
+    "default": 0.7
+  },
+  "regex_max_rules": {
+    "type": "int",
+    "description": "正则规则数量上限",
+    "hint": "规则库达到上限后拒绝新增",
+    "default": 200
+  },
+  "regex_push_interval": {
+    "type": "int",
+    "description": "沉淀推送间隔（分钟）",
+    "hint": "向规则来源群定时推送待审批候选；0 关闭自动推送，仅用 /review rule pending 查看",
+    "default": 30
+  },
+  "regex_candidate_ttl": {
+    "type": "int",
+    "description": "候选规则保留天数",
+    "hint": "超过该天数未审批的候选自动丢弃",
+    "default": 3
+  },
+  "regex_push_target": {
+    "type": "string",
+    "description": "沉淀推送目标",
+    "hint": "group=推送到来源群聊天；admin=私聊推送给管理员（regex_push_admin 或 admin_qq）；off=关闭自动推送",
+    "default": "group",
+    "options": ["group", "admin", "off"]
+  },
+  "regex_push_admin": {
+    "type": "list",
+    "description": "私聊推送的管理员 QQ",
+    "hint": "regex_push_target=admin 时生效；留空则使用全局 admin_qq",
+    "default": []
   }
 }

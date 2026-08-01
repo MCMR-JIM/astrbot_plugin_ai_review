@@ -2,6 +2,7 @@
 
 封装 AstrBot 官方插件 KV 存储（Star 基类提供的 put_kv_data /
 get_kv_data），统一为异步 get/put 接口，便于组件注入与测试替换。
+写入失败不抛出：降级为内存态并记录警告，避免击穿调用方主流程。
 """
 
 from __future__ import annotations
@@ -9,7 +10,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ..utils.logger import get_logger
+
 KVValue = int | float | str | bytes | bool | dict | list | None
+
+logger = get_logger()
 
 
 class KVStore:
@@ -37,5 +42,8 @@ class KVStore:
             return default
 
     async def put(self, key: str, value: KVValue) -> None:
-        """写入键值。"""
-        await self._putter(key, value)
+        """写入键值；写入失败仅记录警告，不抛出。"""
+        try:
+            await self._putter(key, value)
+        except Exception as exc:
+            logger.warning("[AI审核] KV 写入失败（键 %s，数据保持内存态）：%s", key, exc)

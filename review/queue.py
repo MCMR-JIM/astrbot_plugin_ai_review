@@ -6,8 +6,16 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from ..models import ReviewStatus, ReviewTask
+from ..config import safe_int
+from ..models import ReviewLog, ReviewStatus, ReviewTask
+from ..utils.logger import get_logger, log_review
 from .persistence import KVStore
+
+logger = get_logger()
+
+# 已处理任务（approved/rejected）最多保留条数，超出后清理最旧的，
+# 防止队列与 KV 快照无限增长（pending 任务不受此限制）。
+_DECIDED_RETENTION = 200
 
 
 class ReviewQueue:
@@ -74,9 +82,15 @@ class ReviewQueue:
         if self._get_config is None:
             return False
         config = self._get_config(task.group_id)
-        max_total = int(config.get("max_pending_total", 200))
-        max_per_user = int(config.get("max_pending_per_user", 2))
-        if len(self._tasks) >= max_total:
+        max_total = safe_int(config.get("max_pending_total"), 200)
+        max_per_user = safe_int(config.get("max_pending_per_user"), 2)
+        # 总量上限只统计待处理任务；已处理任务不再占用队列容量
+        pending_total = sum(
+            1
+            for item in self._tasks.values()
+            if item.status is ReviewStatus.PENDING
+        )
+        if pending_total >= max_total:
             return True
         same_user = sum(
             1
@@ -153,15 +167,48 @@ class ReviewQueue:
             return len(self._pending_locked())
 
     async def _cleanup_locked(self) -> list[ReviewTask]:
+        """清理过期任务与超量保留的已处理任务。
+
+        Returns:
+            本次清理掉的过期任务列表。
+        """
         expired = []
+        dirty = False
         for task in list(self._tasks.values()):
             if task.status is ReviewStatus.PENDING and task.is_expired:
                 task.mark_expired()
                 expired.append(task)
                 self._tasks.pop(task.task_id, None)
-        if expired:
+                log_review(
+                    ReviewLog(
+                        group_id=task.group_id,
+                        user_id=task.user_id,
+                        content=task.result.reason or "",
+                        risk=task.result.risk,
+                        review_status="expired",
+                    )
+                )
+                logger.info("[AI审核] 任务 %s 已超时失效。", task.task_id)
+                dirty = True
+        if self._trim_decided_locked():
+            dirty = True
+        if dirty:
             await self._save()
         return expired
+
+    def _trim_decided_locked(self) -> bool:
+        """删除超出保留上限的最旧已处理任务；有删除返回 True。"""
+        decided = [
+            task
+            for task in self._tasks.values()
+            if task.status is not ReviewStatus.PENDING
+        ]
+        if len(decided) <= _DECIDED_RETENTION:
+            return False
+        decided.sort(key=lambda task: task.created_at)
+        for task in decided[: len(decided) - _DECIDED_RETENTION]:
+            self._tasks.pop(task.task_id, None)
+        return True
 
     def _pending_locked(self, group_id: str | None = None) -> list[ReviewTask]:
         tasks = [

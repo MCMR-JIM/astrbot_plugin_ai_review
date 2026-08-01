@@ -51,6 +51,19 @@ class ReviewMode(str, Enum):
     BOTH = "both"
 
 
+class RuleStatus(str, Enum):
+    """正则规则状态。
+
+    OBSERVING: 观察期（命中仍走 LLM，统计规则判定与 LLM 判定的一致性）；
+    ACTIVE: 已激活（命中直接生成审核任务，跳过 LLM）；
+    DISABLED: 已停用（熔断或管理员手动停用）。
+    """
+
+    OBSERVING = "observing"
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
 @dataclass(slots=True)
 class ChatRecord:
     """一条群聊记录。
@@ -202,6 +215,7 @@ class ReviewTask:
     decided_at: float | None = None
     platform_id: str = ""
     session_id: str = ""
+    rule_id: str = ""
 
     @classmethod
     def create(
@@ -214,6 +228,7 @@ class ReviewTask:
         timeout: float,
         platform_id: str = "",
         session_id: str = "",
+        rule_id: str = "",
     ) -> "ReviewTask":
         """创建审核任务。
 
@@ -224,6 +239,7 @@ class ReviewTask:
             result: AI 审核结果。
             context: 聊天上下文。
             timeout: 超时秒数。
+            rule_id: 命中的正则规则 ID（规则层任务使用）。
 
         Returns:
             新创建的审核任务。
@@ -240,6 +256,7 @@ class ReviewTask:
             expires_at=now + timeout,
             platform_id=platform_id,
             session_id=session_id,
+            rule_id=rule_id,
         )
 
     def to_dict(self) -> dict:
@@ -258,6 +275,7 @@ class ReviewTask:
             "decided_at": self.decided_at,
             "platform_id": self.platform_id,
             "session_id": self.session_id,
+            "rule_id": self.rule_id,
         }
 
     @classmethod
@@ -296,6 +314,7 @@ class ReviewTask:
             decided_at=float(raw_decided) if raw_decided is not None else None,
             platform_id=str(data.get("platform_id", "")),
             session_id=str(data.get("session_id", "")),
+            rule_id=str(data.get("rule_id", "")),
         )
 
     @property
@@ -353,3 +372,143 @@ class ReviewLog:
     admin_id: str = ""
     punishment: str = ""
     blacklist_sync: str = ""
+
+
+@dataclass(slots=True)
+class RuleRecord:
+    """一条正则审核规则（KV 持久化）。
+
+    Attributes:
+        rule_id: 规则唯一 ID。
+        pattern: 正则表达式原文。
+        source: 来源（auto=AI 沉淀，manual=管理员添加）。
+        note: 规则说明。
+        level: 违规等级 1~3（决定风险值与建议处罚）。
+        status: 规则状态（观察/激活/停用）。
+        hits: 命中次数（观察期表示判定一致次数）。
+        observed: 观察期参与判定的总次数。
+        approved: 命中生成任务后被管理员通过数。
+        rejected: 命中生成任务后被管理员拒绝数。
+        created_at: 创建时间戳。
+        last_ts: 最近命中时间戳。
+    """
+
+    rule_id: str
+    pattern: str
+    source: str = "manual"
+    note: str = ""
+    level: int = 1
+    status: RuleStatus = RuleStatus.ACTIVE
+    hits: int = 0
+    observed: int = 0
+    approved: int = 0
+    rejected: int = 0
+    created_at: float = field(default_factory=time.time)
+    last_ts: float = 0.0
+
+    @property
+    def accuracy(self) -> float:
+        """管理员确认准确率（无确认记录时返回 1.0 避免除零）。"""
+        decided = self.approved + self.rejected
+        if decided <= 0:
+            return 1.0
+        return self.approved / decided
+
+    def to_dict(self) -> dict:
+        """序列化为字典（用于 KV 持久化）。"""
+        return {
+            "rule_id": self.rule_id,
+            "pattern": self.pattern,
+            "source": self.source,
+            "note": self.note,
+            "level": self.level,
+            "status": self.status.value,
+            "hits": self.hits,
+            "observed": self.observed,
+            "approved": self.approved,
+            "rejected": self.rejected,
+            "created_at": self.created_at,
+            "last_ts": self.last_ts,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RuleRecord":
+        """从字典恢复规则（异常字段按默认值兜底）。"""
+        raw_status = data.get("status", RuleStatus.ACTIVE.value)
+        try:
+            status = RuleStatus(raw_status)
+        except ValueError:
+            status = RuleStatus.ACTIVE
+        return cls(
+            rule_id=str(data.get("rule_id", "")),
+            pattern=str(data.get("pattern", "")),
+            source=str(data.get("source", "manual")),
+            note=str(data.get("note", "")),
+            level=int(data.get("level", 1) or 1),
+            status=status,
+            hits=int(data.get("hits", 0) or 0),
+            observed=int(data.get("observed", 0) or 0),
+            approved=int(data.get("approved", 0) or 0),
+            rejected=int(data.get("rejected", 0) or 0),
+            created_at=float(data.get("created_at", 0)),
+            last_ts=float(data.get("last_ts", 0) or 0),
+        )
+
+
+@dataclass(slots=True)
+class RuleCandidate:
+    """一条待管理员审批的规则候选（AI 沉淀，KV 持久化）。
+
+    Attributes:
+        candidate_id: 候选唯一 ID。
+        pattern: 提炼出的正则表达式。
+        note: 规则说明。
+        level: 违规等级 1~3。
+        group_id: 来源群号。
+        user_id: 被审核用户 ID。
+        session_id: 来源消息会话（用于向该群推送审批请求）。
+        source_task_id: 来源审核任务 ID。
+        created_at: 创建时间戳。
+    """
+
+    candidate_id: str
+    pattern: str
+    note: str = ""
+    level: int = 1
+    group_id: str = ""
+    user_id: str = ""
+    platform_id: str = ""
+    session_id: str = ""
+    source_task_id: str = ""
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        """序列化为字典（用于 KV 持久化）。"""
+        return {
+            "candidate_id": self.candidate_id,
+            "pattern": self.pattern,
+            "note": self.note,
+            "level": self.level,
+            "group_id": self.group_id,
+            "user_id": self.user_id,
+            "platform_id": self.platform_id,
+            "session_id": self.session_id,
+            "source_task_id": self.source_task_id,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RuleCandidate":
+        """从字典恢复候选。"""
+        return cls(
+            candidate_id=str(data.get("candidate_id", "")),
+            pattern=str(data.get("pattern", "")),
+            note=str(data.get("note", "")),
+            level=int(data.get("level", 1) or 1),
+            group_id=str(data.get("group_id", "")),
+            user_id=str(data.get("user_id", "")),
+            platform_id=str(data.get("platform_id", "")),
+            session_id=str(data.get("session_id", "")),
+            source_task_id=str(data.get("source_task_id", "")),
+            created_at=float(data.get("created_at", 0)),
+        )

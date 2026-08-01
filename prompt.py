@@ -10,12 +10,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .config import safe_int
 from .models import ChatRecord
 
 _SYSTEM_FILE = "system.txt"
 _USER_FILE = "user.txt"
 _OUTPUT_FILE = "output.txt"
 _REASON_FILE = "reason.txt"
+_RULE_FILE = "rule.txt"
 
 
 class PromptManager:
@@ -27,6 +29,8 @@ class PromptManager:
         system: 系统审核规则原文。
         user: 用户聊天记录模板（含 {records}/{target} 占位符）。
         output: 输出 JSON 格式约束原文。
+        reason: 审核原因模板。
+        rule: 正则规则提炼模板（含 {type}/{reason}/{evidence}/{records} 占位符）。
     """
 
     def __init__(
@@ -48,6 +52,7 @@ class PromptManager:
         self.user = ""
         self.output = ""
         self.reason = ""
+        self.rule = ""
         self._sync()
 
     def _resolve_dir(self) -> Path:
@@ -67,7 +72,7 @@ class PromptManager:
         if prompt_dir != self._prompt_dir:
             self._prompt_dir = prompt_dir
             self._cached.clear()
-        for name in (_SYSTEM_FILE, _USER_FILE, _OUTPUT_FILE, _REASON_FILE):
+        for name in (_SYSTEM_FILE, _USER_FILE, _OUTPUT_FILE, _REASON_FILE, _RULE_FILE):
             self._load(name)
 
     def _load(self, name: str) -> str:
@@ -102,6 +107,8 @@ class PromptManager:
             self.output = content
         elif name == _REASON_FILE:
             self.reason = content
+        elif name == _RULE_FILE:
+            self.rule = content
         return content
 
     def build_system(self) -> str:
@@ -111,7 +118,7 @@ class PromptManager:
             系统提示词文本，已替换 risk 阈值占位符。
         """
         self._sync()
-        threshold = int(self._get_config().get("risk_threshold", 80))
+        threshold = safe_int(self._get_config().get("risk_threshold"), 80)
         return self.system.replace("{threshold}", str(threshold))
 
     def build_user(
@@ -147,3 +154,27 @@ class PromptManager:
         if self.reason:
             return f"{self.output}\n\n{self.reason}"
         return self.output
+
+    def build_rule(self, task: Any) -> str:
+        """构建正则规则提炼 Prompt（基于已确认的审核任务）。
+
+        Args:
+            task: 已通过管理员确认的 ReviewTask。
+
+        Returns:
+            渲染后的提炼提示词；模板缺失时返回空字符串。
+        """
+        self._sync()
+        if not self.rule:
+            return ""
+        records = "\n".join(
+            record.to_prompt_line(index)
+            for index, record in enumerate(task.context, start=1)
+        ) or "（无上下文）"
+        evidence = "；".join(task.result.evidence) or "（无证据）"
+        return (
+            self.rule.replace("{type}", task.result.type or "未知")
+            .replace("{reason}", task.result.reason or "")
+            .replace("{evidence}", evidence)
+            .replace("{records}", records)
+        )

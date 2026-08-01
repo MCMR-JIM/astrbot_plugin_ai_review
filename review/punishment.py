@@ -1,17 +1,26 @@
-"""处罚策略（策略模式 + 流水线）。
+"""处罚执行器（策略模式 + 流水线）。
 
 处罚类型：warn / mute / kick / ban / blacklist。
 每个处罚由若干可复用阶段（stage）按流水线顺序执行，
 warn/mute/kick/ban 通过 PlatformExecutor 调用平台能力，
 blacklist 走黑库适配器（适配器不可用或未启用时自动跳过）。
+各策略实现见 punish_stages.py。
 """
 
 from __future__ import annotations
 
-import abc
 from typing import Any
 
+from ..config import safe_int
 from ..models import PunishmentType, ReviewTask
+from .punish_stages import (
+    BanStrategy,
+    BlacklistStrategy,
+    KickStrategy,
+    MuteStrategy,
+    PunishmentStrategy,
+    WarnStrategy,
+)
 
 # 默认处罚流水线：suggestion -> 有序阶段列表
 DEFAULT_PIPELINES: dict[str, list[str]] = {
@@ -125,155 +134,6 @@ class PlatformExecutor:
             return f"执行 {action} 失败: {exc!s}"
 
 
-class PunishmentStrategy(abc.ABC):
-    """处罚策略抽象基类。"""
-
-    name: str
-
-    @abc.abstractmethod
-    async def execute(self, task: ReviewTask, admin_id: str) -> str:
-        """执行处罚。
-
-        Args:
-            task: 已通过管理员确认的审核任务。
-            admin_id: 确认执行的管理员 ID。
-
-        Returns:
-            执行结果描述文本。
-        """
-
-
-class WarnStrategy(PunishmentStrategy):
-    """警告：向群内发送警告消息。"""
-
-    name = PunishmentType.WARN.value
-
-    def __init__(self, executor: PlatformExecutor) -> None:
-        """初始化。
-
-        Args:
-            executor: 平台能力执行器。
-        """
-        self._executor = executor
-
-    async def execute(self, task: ReviewTask, admin_id: str) -> str:
-        """发送警告消息。"""
-        if not task.session_id:
-            return "警告未发送（缺少会话信息）。"
-        text = (
-            f"[AI审核] 用户 {task.nickname or task.user_id}（{task.user_id}）"
-            f"已被管理员警告。原因：{task.result.reason or '无'}。"
-        )
-        err = await self._executor.send_message(task.session_id, text)
-        return "已发送警告消息。" if not err else f"警告发送失败：{err}"
-
-
-class MuteStrategy(PunishmentStrategy):
-    """禁言：默认 10 分钟。"""
-
-    name = PunishmentType.MUTE.value
-
-    def __init__(self, executor: PlatformExecutor, duration: int = 600) -> None:
-        """初始化。
-
-        Args:
-            executor: 平台能力执行器。
-            duration: 禁言时长（秒），下限 60。
-        """
-        self._executor = executor
-        self._duration = max(60, int(duration))
-
-    async def execute(self, task: ReviewTask, admin_id: str) -> str:
-        """执行禁言。"""
-        if not task.user_id:
-            return "无目标用户，跳过禁言。"
-        err = await self._executor.ban_user(
-            task.platform_id,
-            task.group_id,
-            task.user_id,
-            self._duration,
-        )
-        if err:
-            return f"禁言失败：{err}"
-        return f"已禁言 {task.nickname or task.user_id}（{task.user_id}）{self._duration // 60} 分钟。"
-
-
-class KickStrategy(PunishmentStrategy):
-    """踢出群聊。"""
-
-    name = PunishmentType.KICK.value
-
-    def __init__(self, executor: PlatformExecutor) -> None:
-        """初始化。
-
-        Args:
-            executor: 平台能力执行器。
-        """
-        self._executor = executor
-
-    async def execute(self, task: ReviewTask, admin_id: str) -> str:
-        """执行踢出。"""
-        if not task.user_id:
-            return "无目标用户，跳过踢出。"
-        err = await self._executor.kick_user(
-            task.platform_id,
-            task.group_id,
-            task.user_id,
-        )
-        if err:
-            return f"踢出失败：{err}"
-        return f"已踢出 {task.nickname or task.user_id}（{task.user_id}）。"
-
-
-class BanStrategy(PunishmentStrategy):
-    """拉黑：映射为长期禁言（30 天）。"""
-
-    name = PunishmentType.BAN.value
-    _BAN_DURATION = 2592000  # 30 天（秒）
-
-    def __init__(self, executor: PlatformExecutor) -> None:
-        """初始化。
-
-        Args:
-            executor: 平台能力执行器。
-        """
-        self._executor = executor
-
-    async def execute(self, task: ReviewTask, admin_id: str) -> str:
-        """执行拉黑（长期禁言）。"""
-        if not task.user_id:
-            return "无目标用户，跳过拉黑。"
-        err = await self._executor.ban_user(
-            task.platform_id,
-            task.group_id,
-            task.user_id,
-            self._BAN_DURATION,
-        )
-        if err:
-            return f"拉黑失败：{err}"
-        return f"已拉黑（长期禁言）{task.nickname or task.user_id}（{task.user_id}）。"
-
-
-class BlacklistStrategy(PunishmentStrategy):
-    """加入皮梦云黑库。"""
-
-    name = PunishmentType.BLACKLIST.value
-
-    def __init__(self, adapter: Any) -> None:
-        """初始化。
-
-        Args:
-            adapter: BlacklistAdapter 实例，可为 None。
-        """
-        self._adapter = adapter
-
-    async def execute(self, task: ReviewTask, admin_id: str) -> str:
-        """同步黑库。"""
-        if self._adapter is None or not self._adapter.available:
-            return "黑库适配器不可用，跳过黑库同步。"
-        return await self._adapter.sync_task(task)
-
-
 class Punisher:
     """处罚执行器（流水线）。
 
@@ -314,7 +174,7 @@ class Punisher:
             return
         config = self._get_config(group_id)
         self._blacklist_enabled = bool(config.get("enable_blacklist", False))
-        mute_duration = int(config.get("mute_duration", 600))
+        mute_duration = safe_int(config.get("mute_duration"), 600)
         if mute_duration != self._mute_duration:
             self._mute_duration = mute_duration
             self._stages[PunishmentType.MUTE.value] = MuteStrategy(
