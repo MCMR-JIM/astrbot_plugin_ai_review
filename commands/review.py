@@ -89,7 +89,7 @@ class ReviewCommandMixin:
             return "本次审核未发现违规，或目标被过滤（白名单/冷却/无记录）。"
         return (
             f"⚠️ 已生成审核任务 #{task.task_id}\n"
-            f"用户: {task.nickname}({task.user_id})\n"
+            f"用户: {nickname}({uid})\n"
             f"风险: {task.result.risk}  类型: {task.result.type or '-'}\n"
             f"原因: {task.result.reason or '-'}\n"
             f"建议: {task.result.suggestion}\n"

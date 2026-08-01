@@ -1,145 +1,217 @@
-<!-- 请在发布前把本文件中的示例令牌、路径与账号替换为你自己的实际值。 -->
-
 # astrbot_plugin_ai_review
 
-基于 AstrBot 大模型的群聊 AI 审核助手。利用 AstrBot 已接入的大语言模型对群成员聊天记录进行分析，为管理员生成审核建议；AI 仅负责辅助审核，所有处罚行为必须由管理员确认后执行。
+基于 AstrBot 已接入大语言模型的群聊 AI 审核插件。
 
-[![AGPL-3.0 license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+AI 自动分析群成员聊天记录，为管理员生成审核建议（风险值、违规类型、证据、建议处罚），
+并生成待审核任务；管理员确认后由插件执行处罚流水线。
 
-## 功能
+> **重要**：AI 仅负责辅助审核，**不直接处罚用户**；所有处罚行为必须由管理员通过 `/review pass` 人工确认后执行。
 
-- **主动审核**：`/review @成员`、`/review <uid>`、`/review recent`，管理员随时发起审核
+## 功能特性
+
+- **主动审核**：`/review @成员`、`/review <uid>`、`/review recent`
 - **被动自主审核**：收到群消息后后台自动分析（可配置触发模式，不阻塞消息响应），支持独立开关
 - **被动审核开关**：可在配置面板或 `/review auto on|off` 命令中随时开关被动自主审核
+- **审核队列**：待审核列表 / 详情 / 通过 / 拒绝，超时自动失效
+- **数据持久化**：待审核任务、冷却表、违规统计与按群配置通过 AstrBot 官方 KV 存储持久化，重启不丢
+- **队列治理**：同一用户待处理任务数与全局队列总量可配置上限，防止刷屏堆积
+- **违规统计**：`/review stats` 查看按群/按用户的违规次数、类型与处理结果
 - **正则规则引擎**：将反复出现的违规模式提炼为规则候选（`data/prompts/rule.txt`），定期推送审批请求（目标可配置：来源群聊天 / 指定管理员私聊 / 关闭，`/reviewconfig group <群号> regex_push_target group|admin|off`），管理员 `/review rule approve|deny` 确认后才进入观察期；观察期命中仍走 AI 对比验证，准确率达标自动激活，不足自动熔断停用，大幅节省 token
 - **按群配置覆盖**：不同群可独立设置阈值、开关与处罚参数（`/reviewconfig group`）
 - **处罚策略**：warn / mute / kick / ban / blacklist，流水线模式，可配置扩展
-- **皮梦云黑库同步**：通过 Adapter 弱依赖接入，存在即同步、缺失自动跳过
+- **皮梦云黑库同步**：通过皮梦云黑库插件同步，未安装时自动跳过（弱依赖）
+- **全异步**：被动审核以后台任务执行，任务异常有日志可查
 - **配置热加载**：配置修改后即时生效（含处罚配置）
 - **LLM 调用加固**：网络失败自动退避重试，采样温度可配置（默认 0.3 保证一致性）
-- **数据持久化**：待审核任务、冷却表、违规统计与按群配置通过 AstrBot 官方 KV 存储持久化，重启不丢
-- **队列治理**：同一用户待处理任务数与全局队列总量可配置上限，防止刷屏堆积
+- **Prompt 外置**：审核规则与提示词独立存放于文本文件，可热加载
+- **零第三方依赖**：仅使用 AstrBot 平台 API
 
 ## 安装
 
-1. 在 AstrBot 中进入「插件管理」→「插件市场」搜索 `astrbot_plugin_ai_review` 或手动安装；
-2. 或在 AstrBot 的 `data/plugins` 目录下 clone 本仓库并安装依赖：
-   ```bash
-   git clone https://github.com/Ni-ShuWu/astrbot_plugin_ai_review.git
-   cd astrbot_plugin_ai_review
-   pip install -r requirements.txt
-   ```
+1. 将本插件目录放入 AstrBot 的插件目录（如 `addons/` 或 AstrBot 管理面板中指定的插件目录）；
+2. 在 AstrBot 管理面板中启用插件；
 3. 确认已配置可用的对话模型 Provider（聊天类模型）。
-4. 重载 / 重启 AstrBot 后，插件即自动启用。
 
-## 快速开始
-
-1. 将机器人拉入群聊；
-2. 让机器人保持在线，群内聊天记录会自动缓存；
-3. 管理员在群内发送 `/review @违规成员` 或 `/review recent` 主动审核；
-4. 默认同时启用被动审核：机器人会在后台自动分析群消息，生成待审核任务；
-5. 管理员用 `/review list` 查看任务，`/review detail <id>` 查看详情，`/review pass <id>` 通过并处罚，`/review reject <id>` 拒绝。
-
-> 若主动审核提示「无历史记录」，说明该群消息还未被缓存（被动模式关闭或缓存开关未开启），可稍后再试或确认 `enable_history` 配置。
+要求：Python 3.11+，AstrBot >= 4.13.0。
 
 ## 工作原理
 
-```mermaid
-flowchart TD
-    A[收到群消息] --> B[缓存聊天记录 HistoryCache]
-    B --> C{触发方式?}
-    C -->|被动| D{启用被动审核?}
-    D -->|否| Z[结束]
-    D -->|是| E[过滤器: 机器人/管理员/群主/白名单/冷却/过短]
-    C -->|主动 /review| E
-    E -->|过滤| Z
-    E -->|通过| F{正则规则层预筛}
-    F -->|命中激活规则| G[直接生成审核任务]
-    F -->|命中观察期规则| H[走 LLM 并对比判定]
-    F -->|未命中| I[调用 AstrBot LLM]
-    H --> I
-    I --> J{解析 JSON}
-    J -->|失败| K[自动重试一次]
-    K -->|再次失败| Z
-    J -->|成功| L{risk >= 阈值?}
-    L -->|否| Z
-    L -->|是| M[生成审核任务入队]
-    G --> M
-    M --> N[管理员查看/通过/拒绝]
-    N -->|通过| O[执行处罚流水线]
-    O --> P{启用皮梦云黑库?}
-    P -->|是| Q[同步黑库]
-    P -->|否| R[完成]
+### 总体架构
+
+插件由 6 个核心模块协作完成审核，模块之间通过依赖注入（`get_config` 回调）解耦：
+
+| 模块 | 职责 |
+|------|------|
+| `HistoryCache` | 按群缓存最近聊天记录（`deque`，容量由 `history_count` 控制） |
+| `PromptManager` | 加载 `data/prompts/` 下的 Prompt 模板并组装（带 mtime 热加载） |
+| `LLMClient` | 封装 AstrBot Provider 调用，支持并发限流与管理员异常通知 |
+| `ReviewWorkflow` | 审核主流程：过滤 → 组装 → 调用 → 解析 → 阈值判定 → 入队 |
+| `ReviewQueue` | 待确认审核任务队列（内存），支持超时自动失效 |
+| `Punisher` | 按建议处罚类型执行有序处罚流水线（Strategy 模式） |
+
+### 被动审核流程
+
+群消息到达后，插件在后台任务中按以下流程处理：
+
+```text
+群消息到达
+├─ 缓存开启 或 review_mode 含 passive？
+│   ├─ 否 → 不处理
+│   └─ 是 → 后台任务 on_message → HistoryCache 缓存该消息
+│       └─ review_mode 为 passive / both？
+│           ├─ 否 → 不处理
+│           └─ 是 → 前置过滤（机器人 / 管理员 / 白名单 / 冷却 / 过短消息）
+│               ├─ 命中过滤 → 跳过并记录 debug 日志
+│               └─ 通过 → 组装 Prompt（system + user + output）→ LLM 调用（并发限流）
+│                   ├─ JSON 解析失败 → 重试一次（仍失败则结束本次审核）
+│                   └─ 解析成功 → illegal 且 risk >= risk_threshold？
+│                       ├─ 否 → 不处理
+│                       └─ 是 → 生成 ReviewTask 入队 → 记录结构化日志，等待管理员处理
 ```
 
-## 审核流程
+说明：
 
-1. 群消息自动缓存到内存（每群最近 N 条，默认 50）。
-2. 触发方式：管理员主动 `/review` 或被动自动分析。
-3. AI 调用前先过滤：机器人、管理员、群主、白名单、冷却中用户、空消息、过短消息。
-4. 若命中已激活正则规则，直接生成审核任务（跳过 LLM，节省 token）。
-5. 否则将最近聊天记录构造 Prompt 调用 AstrBot LLM。
-6. LLM 返回 JSON 审核结果（illegal / risk / type / reason / evidence / suggestion）。
-7. 若 risk 低于阈值，结束；否则生成审核任务加入审核队列。
-8. 管理员通过后执行处罚流水线（warn → mute → kick → ban → blacklist 等），可选同步皮梦云黑库。
+- 记录先写入历史缓存再做过滤，因此管理员/机器人的发言也会进入缓存作为审核上下文（但不会触发审核）。
+- 前置过滤包括：机器人自身消息、管理员/群主、白名单用户、冷却期内的重复触发、空消息与过短消息（`min_msg_len`）。
+- 若 `enable_history=false`，被动审核仍可用：此时以触发审核的那条消息本身作为唯一上下文进行分析。
+- 若 `enable_passive_review=false`（或执行过 `/review auto off`），群消息仍会按 `enable_history` 缓存，但不再自动触发 AI 审核；主动 `/review` 命令不受影响。
+- LLM 返回的 JSON 解析失败会自动重试一次，仍失败则结束本次审核并记录错误日志。
+- 风险判定采用 `illegal == true 且 risk >= risk_threshold` 双重条件，任一不满足即视为不违规。
 
-## Prompt 维护
+### 主动审核流程
+
+管理员执行 `/review @成员`、`/review <uid>` 或 `/review recent` 时：
+
+1. 从该群历史缓存中取出目标用户的最近发言（或最近整段聊天记录）；
+2. 与被动审核共用同一套 Prompt 组装、LLM 调用、解析与阈值判定流程；
+3. 命中违规则生成审核任务并入队，管理员会立即收到包含任务 ID 的摘要；
+4. 主动审核同样受白名单与冷却限制。
+
+> 提示：`/review <uid>` 依赖历史缓存，请确保 `enable_history=true` 且该群已有消息被缓存。
+
+### 审核任务状态机
+
+```text
+PENDING（待处理，命中违规后入队）
+├─ 管理员 /review pass <id>   → APPROVED（通过，执行处罚流水线）
+├─ 管理员 /review reject <id> → REJECTED（拒绝，仅记录日志）
+└─ 超过 review_timeout 秒     → EXPIRED（超时自动失效）
+```
+
+- **通过**（`/review pass <id>`）：按 AI 建议的处罚类型执行整条处罚流水线，执行结果与审核日志一并记录；
+- **拒绝**（`/review reject <id>`）：仅记录日志，不执行任何处罚；
+- **超时**（`review_timeout` 秒）：任务自动失效，`/review list` / `detail` / `pass` 等操作会自动清理过期任务。
+
+### 处罚流水线
+
+处罚采用流水线模式：每种建议处罚对应一个有序阶段列表，依次执行，结果汇总返回给管理员。
+
+| 建议处罚 | 默认流水线 | 阶段行为 |
+|----------|-----------|---------|
+| warn     | `warn` | 在群内发送警告消息（含原因） |
+| mute     | `warn` → `mute` | 按 `mute_duration`（秒）禁言 |
+| kick     | `warn` → `kick` | 将成员移出群聊 |
+| ban      | `warn` → `ban` | 长期禁言（30 天） |
+| blacklist| `warn` → `blacklist` | 同步至皮梦云黑库 |
+
+可通过配置 `punish_pipeline` 覆盖默认流水线，例如：
+
+```json
+{"mute": ["warn", "mute"], "ban": ["ban"]}
+```
+
+阶段取值为 `warn` / `mute` / `kick` / `ban` / `blacklist`，可按需组合扩展。
+未知阶段会跳过并在结果中提示；`blacklist` 阶段还会额外受 `enable_blacklist` 开关控制。
+
+### 皮梦云黑库同步
+
+当 `enable_blacklist=true` 且检测到 `astrbot_plugin_pimeng_blacklist` 插件已加载时，
+`/review pass` 执行 `blacklist` 处罚会自动调用其 `api.add_to_blacklist` 接口同步黑库。
+
+- 插件未安装 / 未启用 / 未配置 Bot Token 时自动跳过，不影响插件运行；
+- 建议处罚到黑库等级的映射：warn→1、mute→2、kick/ban/blacklist→3。
+
+### Prompt 系统
 
 Prompt 文本独立存放于 `data/prompts/`（或配置 `prompt_path` 指向的自定义目录），修改文件后无需重启，自动生效：
 
-| 文件 | 作用 |
-|------|------|
-| `system.txt` | 系统提示词：审核规则、数据边界、宁缺毋滥原则 |
-| `user.txt` | 用户提示词模板：聊天记录组装与占位符 |
-| `output.txt` | 输出约束：仅返回 JSON，字段与取值说明 |
-| `reason.txt` | 审核原因模板：注入到输出提示词 |
-| `rule.txt` | 正则规则引擎预筛提示词：从违规消息提炼正则模式 |
+| 文件 | 用途 | 占位符 |
+|------|------|--------|
+| `system.txt` | 系统审核规则与风险分级 | `{threshold}`（risk_threshold 值） |
+| `user.txt` | 聊天记录模板 | `{records}`（格式化记录）、`{target}`（审核对象描述） |
+| `output.txt` | 输出 JSON 格式约束 | 无 |
+| `reason.txt` | `reason` 字段的格式化要求 | 无 |
+
+AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取 `warn` / `mute` / `kick` / `ban` / `blacklist`：
+
+```json
+{
+  "illegal": true,
+  "risk": 92,
+  "type": "辱骂",
+  "reason": "...",
+  "evidence": ["...", "..."],
+  "suggestion": "mute"
+}
+```
+
+解析器支持 Markdown 代码块包裹以及 JSON 前后存在杂散文本的情况，解析失败自动重试一次。
 
 ### 配置热加载
 
 所有配置通过统一的 `ConfigManager` 读取，各模块在执行前通过 `get_config` 回调同步最新值，
-修改配置（面板 / `/reviewconfig`）后即时生效，无需重启。
+因此 `history_count`、`review_mode`、`risk_threshold`、`cooldown`、`punish_pipeline`、
+`mute_duration`、`enable_blacklist`、Prompt 目录等修改后**即时生效**，无需重启插件。
 
-### 数据持久化
+### 持久化
 
 待审核任务队列、冷却表、违规统计与按群覆盖配置均通过 AstrBot 官方插件 KV 存储
-（`put_kv_data` / `get_kv_data`）持久化，插件重启后自动恢复。
+（`put_kv_data` / `get_kv_data`）持久化；插件激活（`initialize`）时自动恢复，
+重启后待处理任务不会丢失。任务数据支持 `max_pending_per_user` / `max_pending_total`
+上限治理，超过上限的新任务会被拒绝并记录日志。
 
 ## 配置（后端配置操作）
 
 ### 配置方式一：AstrBot 管理面板（推荐）
 
-1. 打开 AstrBot 管理面板；
-2. 进入「插件管理」→「已安装插件」→ `astrbot_plugin_ai_review`；
+1. 打开 AstrBot 管理面板（默认 `http://<AstrBot地址>:6185`）；
+2. 进入「插件管理」，找到 `astrbot_plugin_ai_review`；
 3. 点击「配置 / 设置」进入表单，按需修改各项参数并保存；
-
-> 提示：在配置面板中修改 `llm_provider_id` 可直接固定审核使用的模型 Provider ID，留空则跟随会话默认模型。
+4. 表单由 `_conf_schema.json` 自动生成，包含类型、默认值、说明与可选值（如 `review_mode`）。
 
 ### 配置方式二：/reviewconfig 命令（管理员）
 
-```
+在群聊中直接执行：
+
+```text
 /reviewconfig                 查看当前全部配置
 /reviewconfig <key> <value>   修改配置并持久化
 ```
 
-- 布尔类配置（如 `enable_passive_review`）接受 `true/false`、`1/0`、`yes/no`、`on/off`；
+示例：
+
+```text
+/reviewconfig review_mode active
+/reviewconfig risk_threshold 70
+/reviewconfig whitelist 10001,10002
+/reviewconfig mute_duration 1200
+/reviewconfig punish_pipeline {"mute": ["warn", "mute"], "ban": ["ban"]}
+```
+
+说明：
+
 - 列表类配置（如 `whitelist`、`admin_qq`）用英文逗号分隔；
 - JSON 类配置（如 `punish_pipeline`）支持直接粘贴含空格的完整 JSON；
-- 数值类配置自动做范围校验；
+- `review_mode` 仅接受 `active` / `passive` / `both`，其他值会被拒绝；
 - 修改成功后立即生效，并同步持久化到 AstrBot 配置文件中。
 
 ### 配置方式三：手动编辑配置文件
 
 配置实际存储于 AstrBot 的配置目录中（通常为 AstrBot 根目录下的 `data/config/astrbot_plugin_ai_review_config.json`）：
 
-```json
-{
-  "history_count": 50,
-  "review_mode": "both",
-  "enable_passive_review": true,
-  "risk_threshold": 80
-}
-```
+1. 关闭 AstrBot 或先在管理面板禁用插件；
+2. 编辑该 JSON 文件，保持 JSON 语法合法；
+3. 重新启用插件或重启 AstrBot。
 
 > 不建议在插件运行时手动编辑文件，配置可能被内存中的值覆盖。
 
@@ -168,15 +240,6 @@ Prompt 文本独立存放于 `data/prompts/`（或配置 `prompt_path` 指向的
 | `punish_pipeline` | object | {} | 处罚流水线映射（键为建议处罚，值为有序阶段列表） |
 | `max_pending_per_user` | int | 2 | 同一群内同一用户最多同时存在的待处理任务数 |
 | `max_pending_total` | int | 200 | 全局待处理任务总数上限 |
-| `enable_regex_prefilter` | bool | true | 启用正则预筛选（命中已激活规则跳过 LLM） |
-| `regex_sediment` | bool | true | 启用规则自动沉淀（管理员通过后提炼正则候选） |
-| `regex_min_hits` | int | 5 | 规则激活/熔断所需最小判定次数 |
-| `regex_min_accuracy` | float | 0.7 | 规则最低准确率（0~1），低于该值自动停用 |
-| `regex_max_rules` | int | 200 | 正则规则数量上限 |
-| `regex_push_interval` | int | 30 | 沉淀推送间隔（分钟），0 关闭自动推送 |
-| `regex_candidate_ttl` | int | 3 | 候选规则保留天数 |
-| `regex_push_target` | string | group | 沉淀推送目标：group / admin / off |
-| `regex_push_admin` | list | [] | 私聊推送的管理员 QQ（留空用全局 admin_qq） |
 
 ### 常见配置场景
 
@@ -208,59 +271,41 @@ Prompt 文本独立存放于 `data/prompts/`（或配置 `prompt_path` 指向的
 | `/review detail <id>` | 查看任务详情（证据、聊天上下文） |
 | `/review pass <id>` | 通过任务并执行处罚流水线 |
 | `/review reject <id>` | 拒绝任务（不处罚，仅记录日志） |
-| `/review rule list` | 查看正则规则列表 |
-| `/review rule pending` | 查看待审批候选规则 |
-| `/review rule approve <id>` | 批准候选规则（进入观察期） |
-| `/review rule deny <id>` | 拒绝候选规则 |
-| `/review rule add <pattern> [level]` | 手动添加正则规则（1~3 级） |
-| `/review rule disable <id>` | 停用规则 |
-| `/review rule enable <id>` | 启用规则 |
-| `/review rule del <id>` | 删除规则 |
 | `/reviewconfig` | 查看全部配置 |
 | `/reviewconfig <key> <value>` | 修改配置并持久化 |
 | `/reviewconfig group <群号> [key value\|reset]` | 查看 / 设置 / 清除按群覆盖配置 |
 
-> 所有命令均为管理员权限；`/review` 与 `/reviewconfig` 需在群内或私聊使用。
-
-## 皮梦云黑库
-
-若已安装并启用皮梦云黑库插件（`astrbot_plugin_pimeng_blacklist`），且配置 `enable_blacklist=true`，
-则审核通过且处罚建议为 `blacklist` 时，自动调用其接口将用户加入黑名单；插件缺失时自动跳过，不影响插件运行。
-
-## 代码结构
+## 目录结构
 
 ```
-astrbot_plugin_ai_review/
-├── main.py               插件入口：装配各模块、注册命令与消息监听、定时推送循环
-├── config.py             配置中心（默认值、类型转换、校验、持久化）
-├── models.py             数据模型（dataclass：ChatRecord / ReviewResult / ReviewTask / ReviewLog）
-├── prompt.py             Prompt 管理器（目录热加载、占位符替换）
-├── review/
-│   ├── history.py        聊天记录缓存（deque 自动淘汰）
-│   ├── workflow.py       审核工作流（缓存/触发/过滤/LLM/解析/入队/日志）
-│   ├── queue.py          审核任务队列（查看/通过/拒绝/超时失效，KV 持久化）
-│   ├── filters.py        消息过滤与冷却（KV 持久化）
-│   ├── rules.py          正则规则引擎（预筛/观察期/激活/熔断）
-│   ├── punish_stages.py  处罚阶段定义
-│   ├── punishment.py     处罚执行（策略模式 + 流水线）
-│   ├── persistence.py     KV 存储封装
-│   └── stats.py           违规统计（KV 持久化）
-├── commands/
-│   ├── review.py         /review 命令 mixin
-│   └── config.py         /reviewconfig 命令 mixin
-├── adapters/
-│   └── pimeng.py         皮梦云黑库 Adapter（弱依赖）
-├── utils/
-│   ├── llm.py            AstrBot LLM 调用客户端（限流/重试/告警）
-│   ├── parser.py         LLM 回复 JSON 解析与重试
-│   └── logger.py         日志封装
-├── data/prompts/         Prompt 文件（system/user/output/reason/rule）
-├── tests/                unittest 测试
-├── metadata.yaml         插件元数据
-└── _conf_schema.json     配置面板 schema
+main.py              插件入口（模块装配、消息监听、命令注册、后台任务管理）
+config.py            配置中心（默认值、类型转换、校验、持久化）
+models.py            数据模型（dataclass：ChatRecord / ReviewResult / ReviewTask / ReviewLog）
+prompt.py            Prompt 构建与热加载
+review/
+  history.py         聊天记录缓存（deque）
+  persistence.py     KV 持久化适配层（封装 AstrBot 官方插件存储）
+  stats.py           违规统计存储（KV 持久化）
+  workflow.py        审核工作流（过滤 / 调用 / 解析 / 入队）
+  queue.py           审核任务队列（超时失效、KV 持久化、容量治理）
+  punishment.py      处罚策略与流水线（Strategy 模式）
+commands/
+  review.py          /review 命令
+  config.py          /reviewconfig 命令
+adapters/
+  blacklist.py       黑库同步适配器抽象接口
+  pimeng.py          皮梦云黑库插件适配器（弱依赖）
+utils/
+  logger.py          统一日志与结构化审核日志
+  llm.py             LLM 调用客户端（并发限流、异常通知）
+  parser.py          LLM 回复 JSON 解析（括号配对、容错）
+data/prompts/        默认 Prompt 文件
+tests/               核心逻辑测试（标准库 unittest，无需 astrbot）
 ```
 
 ## 开发与测试
+
+核心逻辑不依赖 AstrBot 运行环境，可直接运行测试：
 
 ```bash
 python -m unittest discover -s tests -v
@@ -268,6 +313,14 @@ python -m unittest discover -s tests -v
 
 ## 常见问题
 
+- **`/review <uid>` 提示"暂无聊天记录"**：确认 `enable_history=true`，且该群在插件启用后已有消息经过缓存。
+- **被动审核不触发**：检查 `enable_passive_review` 是否为 `true`、`review_mode` 是否为 `passive` / `both`，以及消息是否被前置过滤（机器人、管理员、白名单、冷却、过短）。
 - **修改配置后不生效**：管理面板或 `/reviewconfig` 修改后即时生效；手动编辑配置文件需重载插件或重启。
 - **皮梦云黑库未同步**：确认 `enable_blacklist=true`、皮梦云插件已启用并配置 Bot Token、执行的是 `blacklist` 建议处罚。
-- **插件加载报 `KeyError: 'items'`**：`_conf_schema.json` 中 `punish_pipeline` 已补齐 `items` 子结构，无需处理。
+- **AI 返回解析失败**：检查是否修改过 `output.txt` / `reason.txt`，确认模型遵守 JSON 格式；插件会重试一次并在日志中记录错误。
+- **日志在哪里看**：AstrBot 运行日志（`logger` 名称 `astrbot_plugin_ai_review`），审核记录含时间、群、用户、风险、结果、管理员、处罚与黑库同步状态。
+
+## 免责声明
+
+本插件仅提供审核建议，所有处罚操作均由管理员人工确认后执行。
+请遵守所在群聊规则与法律法规，合理使用审核能力。
