@@ -74,8 +74,9 @@
   },
   "llm_provider_id": {
     "type": "string",
-    "description": "审核使用的 AstrBot 模型 Provider ID",
-    "hint": "留空自动使用会话默认模型（随 /provider 切换变化）；填写 AstrBot 已接入的 Provider ID 可固定审核模型，如 auto_DeepSeek、default。可用 /review provider 查看",
+    "description": "审核使用的 AstrBot 模型",
+    "hint": "在下拉框中选择固定审核使用的模型；留空自动使用会话默认模型（随 /provider 切换变化）",
+    "_special": "select_provider",
     "default": ""
   },
   "llm_temperature": {

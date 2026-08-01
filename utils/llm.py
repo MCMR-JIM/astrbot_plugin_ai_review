@@ -59,11 +59,17 @@ class LLMClient:
         self._temperature = _DEFAULT_TEMPERATURE
         self._retry_times = max(0, int(retry_times))
         self._retry_delays = tuple(retry_delays)
+        self._last_provider_id = ""
 
     @property
     def max_concurrency(self) -> int:
         """当前并发上限。"""
         return self._max_concurrency
+
+    @property
+    def last_provider_id(self) -> str:
+        """最近一次实际完成调用的 Provider ID（未调用或失败为空）。"""
+        return self._last_provider_id
 
     def _sync_config(self) -> None:
         """同步并发上限与温度配置（热加载）。"""
@@ -167,6 +173,10 @@ class LLMClient:
         if response is None:
             logger.error("[AI审核] 模型返回为空，本次审核结束。")
             return None
+        try:
+            self._last_provider_id = provider.meta().id
+        except Exception:
+            self._last_provider_id = ""
         completion = getattr(response, "completion_text", None)
         if completion is None and isinstance(response, str):
             completion = response

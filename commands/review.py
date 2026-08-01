@@ -90,6 +90,7 @@ class ReviewCommandMixin:
         return (
             f"⚠️ 已生成审核任务 #{task.task_id}\n"
             f"用户: {nickname}({uid})\n"
+            f"模型: {task.llm_provider or '未知'}\n"
             f"风险: {task.result.risk}  类型: {task.result.type or '-'}\n"
             f"原因: {task.result.reason or '-'}\n"
             f"建议: {task.result.suggestion}\n"
@@ -104,6 +105,7 @@ class ReviewCommandMixin:
             return "本次审核未发现违规，或暂无聊天记录。"
         return (
             f"⚠️ 已生成审核任务 #{task.task_id}（群聊整体）\n"
+            f"模型: {task.llm_provider or '未知'}\n"
             f"风险: {task.result.risk}  类型: {task.result.type or '-'}\n"
             f"原因: {task.result.reason or '-'}\n"
             f"建议: {task.result.suggestion}\n"
@@ -153,6 +155,7 @@ class ReviewCommandMixin:
                 f"#{task.task_id} {task.nickname or task.user_id}({task.user_id}) "
                 f"risk={task.result.risk} 类型={task.result.type or '-'} "
                 f"建议={task.result.suggestion}"
+                + (f" [{task.llm_provider}]" if task.llm_provider else "")
             )
         if len(tasks) > _PER_PAGE:
             lines.append(f"…共 {len(tasks)} 条")
@@ -217,7 +220,15 @@ class ReviewCommandMixin:
                 punishment=approved.result.suggestion,
             )
         )
-        return f"✅ 已通过任务 #{approved.task_id}。\n{punishment_msg}"
+        provider_note = (
+            f"判定模型: {approved.llm_provider}"
+            if approved.llm_provider
+            else ("正则规则命中" if approved.rule_id else "未知来源")
+        )
+        return (
+            f"✅ 已通过任务 #{approved.task_id}（{provider_note}）。\n"
+            f"{punishment_msg}"
+        )
 
     async def _feedback_rule(self, task: "ReviewTask", approved: bool) -> None:
         """将任务处理结果反馈给命中的规则（激活规则统计与熔断）。"""
@@ -406,11 +417,18 @@ class ReviewCommandMixin:
             for index, record in enumerate(task.context, start=1)
         ) or "（无上下文）"
         evidence_lines = "\n".join(f"- {item}" for item in task.result.evidence) or "（无）"
+        if task.llm_provider:
+            source_line = f"判定模型: {task.llm_provider}"
+        elif task.rule_id:
+            source_line = f"判定来源: 正则规则 #{task.rule_id}（未调用模型）"
+        else:
+            source_line = "判定来源: 未知"
         return (
             f"📄 任务 #{task.task_id}\n"
             f"群: {task.group_id}\n"
             f"用户: {task.nickname or '未知'}({task.user_id})\n"
             f"状态: {task.status.value}\n"
+            f"{source_line}\n"
             f"风险: {task.result.risk}  类型: {task.result.type or '-'}\n"
             f"建议处罚: {task.result.suggestion}\n"
             f"原因: {task.result.reason or '-'}\n"

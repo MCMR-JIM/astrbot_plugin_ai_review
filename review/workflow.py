@@ -280,6 +280,7 @@ class ReviewWorkflow:
             result,
             group_id,
             config,
+            llm_provider=self.llm.last_provider_id,
         )
 
     async def _enqueue_task(
@@ -292,6 +293,7 @@ class ReviewWorkflow:
         group_id: str,
         config: dict[str, Any],
         rule_id: str = "",
+        llm_provider: str = "",
     ) -> ReviewTask | None:
         """创建并加入审核任务，记录冷却/统计/日志。
 
@@ -308,6 +310,7 @@ class ReviewWorkflow:
             platform_id=event.get_platform_id(),
             session_id=event.unified_msg_origin,
             rule_id=rule_id,
+            llm_provider=llm_provider,
         )
         if not await self.queue.add(task):
             logger.warning(
