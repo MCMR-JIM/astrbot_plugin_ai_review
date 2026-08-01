@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 import types
 import unittest
@@ -126,6 +127,7 @@ class PluginLifecycleTest(unittest.TestCase):
         async def scenario() -> None:
             plugin = object.__new__(AiReviewPlugin)
             plugin._bg_tasks = set()
+            plugin._terminating = False
             started = asyncio.Event()
 
             async def worker() -> None:
@@ -139,6 +141,53 @@ class PluginLifecycleTest(unittest.TestCase):
 
             self.assertTrue(task.done())
             self.assertTrue(task.cancelled())
+            self.assertEqual(plugin._bg_tasks, set())
+
+        asyncio.run(scenario())
+
+    def test_terminate_rejects_spawn_during_cleanup(self) -> None:
+        async def scenario() -> None:
+            plugin = object.__new__(AiReviewPlugin)
+            plugin._bg_tasks = set()
+            plugin._terminating = False
+            started = asyncio.Event()
+            cancellation_started = asyncio.Event()
+            release_cleanup = asyncio.Event()
+            late_ran = False
+
+            async def existing_worker() -> None:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancellation_started.set()
+                    await release_cleanup.wait()
+                    raise
+
+            async def late_worker() -> None:
+                nonlocal late_ran
+                late_ran = True
+
+            existing_task = plugin._spawn(existing_worker())
+            await started.wait()
+            termination = asyncio.create_task(plugin.terminate())
+            await cancellation_started.wait()
+
+            late_coro = late_worker()
+            late_task = plugin._spawn(late_coro)
+
+            self.assertIsNone(late_task)
+            self.assertEqual(
+                inspect.getcoroutinestate(late_coro), inspect.CORO_CLOSED
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(late_ran)
+            self.assertFalse(termination.done())
+
+            release_cleanup.set()
+            await termination
+
+            self.assertTrue(existing_task.cancelled())
             self.assertEqual(plugin._bg_tasks, set())
 
         asyncio.run(scenario())

@@ -53,6 +53,7 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         """
         super().__init__(context, config)
         self._bg_tasks: set[asyncio.Task] = set()
+        self._terminating = False
         self._kv = KVStore(self.get_kv_data, self.put_kv_data)
         self.config = ConfigManager(config if config else {})
         get_config = self._get_config
@@ -90,6 +91,7 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
 
     async def terminate(self) -> None:
         """取消并等待插件管理的后台任务。"""
+        self._terminating = True
         tasks = tuple(self._bg_tasks)
         for task in tasks:
             if not task.done():
@@ -210,8 +212,11 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         except Exception as exc:
             logger.warning("[AI审核] 推送发送异常（%s）：%s", session, exc)
 
-    def _spawn(self, coro: Any) -> asyncio.Task:
+    def _spawn(self, coro: Any) -> asyncio.Task | None:
         """以受管方式创建后台任务，避免任务被 GC 且异常静默丢失。"""
+        if self._terminating:
+            coro.close()
+            return None
         task = asyncio.create_task(coro)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
