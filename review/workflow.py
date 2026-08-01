@@ -81,6 +81,7 @@ class ReviewWorkflow:
             event,
             target_user_id=event.get_sender_id(),
             target_nickname=event.get_sender_name(),
+            current_record=record,
         )
 
     async def review_target(
@@ -123,6 +124,7 @@ class ReviewWorkflow:
         event: "AstrMessageEvent",
         target_user_id: str,
         target_nickname: str,
+        current_record: ChatRecord | None = None,
     ) -> ReviewTask | None:
         """执行一次完整审核。
 
@@ -151,8 +153,11 @@ class ReviewWorkflow:
             int(config.get("history_count", 50)),
         )
         if not records:
-            logger.info("[AI审核] 群=%s 暂无聊天记录，本次审核跳过。", group_id)
-            return None
+            if current_record is not None:
+                records = [current_record]
+            else:
+                logger.info("[AI审核] 群=%s 暂无聊天记录，本次审核跳过。", group_id)
+                return None
         records = self._trim_records(
             records,
             int(config.get("max_chat_chars", 3000)),
@@ -311,7 +316,19 @@ class ReviewWorkflow:
 
     def _touch_cooldown(self, group_id: str, user_id: str) -> None:
         """记录用户最近的审核时间（设置冷却起点）。"""
+        if len(self._cooldowns) > 1024:
+            self._cleanup_cooldowns()
         self._cooldowns[self._cooldown_key(group_id, user_id)] = time.time()
+
+    def _cleanup_cooldowns(self) -> None:
+        """清理已过期的冷却记录，避免字典无限增长。"""
+        cooldown = int(self._get_config().get("cooldown", 300))
+        now = time.time()
+        self._cooldowns = {
+            key: ts
+            for key, ts in self._cooldowns.items()
+            if now - ts < cooldown
+        }
 
     @staticmethod
     def _cooldown_key(group_id: str, user_id: str) -> str:
@@ -368,8 +385,13 @@ class ReviewWorkflow:
     @staticmethod
     def _to_record(event: "AstrMessageEvent", group_id: str) -> ChatRecord:
         """将消息事件转换为聊天记录。"""
+        # AstrMessageEvent 没有 created_at 属性，时间戳来自 message_obj.timestamp
+        message_obj = getattr(event, "message_obj", None)
+        timestamp = getattr(message_obj, "timestamp", None)
+        if timestamp is None:
+            timestamp = time.time()
         return ChatRecord(
-            timestamp=event.created_at,
+            timestamp=float(timestamp),
             nickname=event.get_sender_name(),
             user_id=event.get_sender_id(),
             content=event.get_message_outline(),

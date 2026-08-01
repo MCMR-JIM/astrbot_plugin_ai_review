@@ -294,31 +294,41 @@ class Punisher:
             blacklist_adapter: BlacklistAdapter 实例，可为 None。
             get_config: 返回配置的回调，用于读取 mute_duration 等。
         """
-        mute_duration = 600
-        pipeline_override: dict[str, list[str]] = {}
+        self._executor = executor
+        self._get_config = get_config
         self._blacklist_enabled = False
-        if get_config is not None:
-            config = get_config()
-            mute_duration = int(config.get("mute_duration", 600))
-            self._blacklist_enabled = bool(config.get("enable_blacklist", False))
-            raw_pipeline = config.get("punish_pipeline") or {}
-            if isinstance(raw_pipeline, dict):
-                pipeline_override = {
-                    str(key): [str(item) for item in value]
-                    for key, value in raw_pipeline.items()
-                    if isinstance(value, list)
-                }
+        self._mute_duration = 600
         self._stages: dict[str, PunishmentStrategy] = {
             PunishmentType.WARN.value: WarnStrategy(executor),
-            PunishmentType.MUTE.value: MuteStrategy(executor, mute_duration),
+            PunishmentType.MUTE.value: MuteStrategy(executor, 600),
             PunishmentType.KICK.value: KickStrategy(executor),
             PunishmentType.BAN.value: BanStrategy(executor),
             PunishmentType.BLACKLIST.value: BlacklistStrategy(blacklist_adapter),
         }
-        self._pipelines: dict[str, list[str]] = {
-            **DEFAULT_PIPELINES,
-            **pipeline_override,
-        }
+        self._pipelines: dict[str, list[str]] = dict(DEFAULT_PIPELINES)
+        self._sync_config()
+
+    def _sync_config(self) -> None:
+        """同步处罚相关配置（支持热加载）。"""
+        if self._get_config is None:
+            return
+        config = self._get_config()
+        self._blacklist_enabled = bool(config.get("enable_blacklist", False))
+        mute_duration = int(config.get("mute_duration", 600))
+        if mute_duration != self._mute_duration:
+            self._mute_duration = mute_duration
+            self._stages[PunishmentType.MUTE.value] = MuteStrategy(
+                self._executor,
+                mute_duration,
+            )
+        raw_pipeline = config.get("punish_pipeline") or {}
+        if isinstance(raw_pipeline, dict):
+            override = {
+                str(key): [str(item) for item in value]
+                for key, value in raw_pipeline.items()
+                if isinstance(value, list)
+            }
+            self._pipelines = {**DEFAULT_PIPELINES, **override}
 
     @property
     def pipelines(self) -> dict[str, list[str]]:
@@ -335,6 +345,7 @@ class Punisher:
         Returns:
             各阶段执行结果汇总。
         """
+        self._sync_config()
         stage_names = self._pipelines.get(task.result.suggestion) or [
             task.result.suggestion
         ]

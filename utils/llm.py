@@ -95,7 +95,13 @@ class LLMClient:
             模型返回的纯文本；无可用模型或调用失败时返回 None。
         """
         self._sync_config()
-        provider = self._context.get_using_provider(umo)
+        try:
+            provider = self._context.get_using_provider(umo)
+        except Exception as exc:
+            message = f"[AI审核] 获取对话模型 Provider 失败: {exc!s}"
+            logger.error(message, exc_info=True)
+            await self._notify(message)
+            return None
         if provider is None:
             message = f"[AI审核] 未找到可用的对话模型 Provider（umo={umo}），本次审核已跳过。"
             logger.error(message)
@@ -116,4 +122,10 @@ class LLMClient:
         if response is None:
             logger.error("[AI审核] 模型返回为空，本次审核结束。")
             return None
-        return response.completion_text or ""
+        completion = getattr(response, "completion_text", None)
+        if completion is None and isinstance(response, str):
+            completion = response
+        if completion is None:
+            logger.error("[AI审核] 模型响应缺少文本内容，本次审核结束。")
+            return None
+        return completion or ""

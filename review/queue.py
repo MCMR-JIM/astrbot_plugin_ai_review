@@ -21,6 +21,7 @@ class ReviewQueue:
     @property
     def pending_count(self) -> int:
         """当前待处理任务数。"""
+        self.cleanup_expired()
         return len(self._pending())
 
     def add(self, task: ReviewTask) -> None:

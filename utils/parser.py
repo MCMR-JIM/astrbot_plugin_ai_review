@@ -11,6 +11,48 @@ import json
 from ..models import PunishmentType, ReviewResult
 
 
+def _scan_json_spans(content: str) -> list[tuple[int, int]]:
+    """扫描所有可能是顶层 JSON 对象的 [start, end] 区间（按出现顺序）。
+
+    使用括号配对定位，跳过字符串内的花括号，兼容 JSON 前后
+    存在含大括号的散文或 Markdown 说明的情况。
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while True:
+        start = content.find("{", i)
+        if start == -1:
+            break
+        depth = 0
+        in_string = False
+        escaped = False
+        end = -1
+        for j in range(start, len(content)):
+            ch = content[j]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end == -1:
+            break
+        spans.append((start, end))
+        i = end + 1
+    return spans
+
+
 def _extract_json(text: str) -> dict:
     """从模型回复文本中提取第一个 JSON 对象。
 
@@ -34,17 +76,17 @@ def _extract_json(text: str) -> dict:
     if lines and lines[-1].strip().startswith("```"):
         lines = lines[:-1]
     content = "\n".join(lines).strip()
-    start = content.find("{")
-    end = content.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("模型回复中未找到 JSON 对象。")
-    try:
-        data = json.loads(content[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"JSON 解析失败: {exc.msg}") from exc
-    if not isinstance(data, dict):
-        raise ValueError("JSON 顶层不是对象。")
-    return data
+    candidates = _scan_json_spans(content)
+    if not candidates:
+        raise ValueError("模型回复中未找到闭合的 JSON 对象。")
+    for start, end in candidates:
+        try:
+            data = json.loads(content[start : end + 1])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise ValueError("模型回复中的 JSON 解析失败或顶层不是对象。")
 
 
 def parse_review_result(text: str) -> ReviewResult:

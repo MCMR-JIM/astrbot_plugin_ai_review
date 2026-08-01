@@ -10,6 +10,18 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
+
+
+def _parse_bool(value: Any) -> bool:
+    """兼容 LLM 返回字符串布尔值（如 "false"/"true"）的情况。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    return False
 
 
 class ReviewStatus(str, Enum):
@@ -103,7 +115,7 @@ class ReviewResult:
         Raises:
             ValueError: 当缺少必要字段或字段类型非法时。
         """
-        illegal = bool(data.get("illegal", False))
+        illegal = _parse_bool(data.get("illegal", False))
         raw_risk = data.get("risk", 0)
         try:
             risk = int(raw_risk)
@@ -186,7 +198,7 @@ class ReviewTask:
         """
         now = time.time()
         return cls(
-            task_id=uuid.uuid4().hex[:8],
+            task_id=uuid.uuid4().hex[:12],
             group_id=group_id,
             user_id=user_id,
             nickname=nickname,
