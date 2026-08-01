@@ -19,3 +19,12 @@ def test_extract_at_accepts_astrbot_at_component():
         message_obj=SimpleNamespace(message=[Plain("/review "), At(qq="10001")])
     )
     assert ReviewCommandMixin._extract_at(event) == "10001"
+
+
+def test_extract_at_accepts_component_like_at():
+    event = SimpleNamespace(
+        message_obj=SimpleNamespace(
+            message=[SimpleNamespace(type="at", qq="10002")]
+        )
+    )
+    assert ReviewCommandMixin._extract_at(event) == "10002"

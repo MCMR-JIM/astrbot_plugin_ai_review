@@ -486,7 +486,7 @@ class ReviewCommandMixin:
         if message_obj is None:
             return ""
         for comp in getattr(message_obj, "message", []):
-            if isinstance(comp, At):
+            if isinstance(comp, At) or getattr(comp, "type", "") == "at":
                 qq = getattr(comp, "qq", None)
                 if qq:
                     return str(qq)
