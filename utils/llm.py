@@ -82,6 +82,46 @@ class LLMClient:
         except (TypeError, ValueError):
             self._temperature = _DEFAULT_TEMPERATURE
 
+    async def _resolve_provider(self, umo: str) -> Any | None:
+        """解析本次审核使用的对话模型 Provider。
+
+        优先使用配置的 ``llm_provider_id`` 指定的 Provider；未配置或
+        找不到时回退到会话当前使用的模型（``get_using_provider``）。
+
+        Args:
+            umo: unified_message_origin，用于获取会话默认模型。
+
+        Returns:
+            Provider 实例；解析失败时返回 None（内部已通知管理员）。
+        """
+        config = self._get_config()
+        provider_id = str(config.get("llm_provider_id", "") or "").strip()
+        if provider_id:
+            get_provider = getattr(self._context, "get_provider_by_id", None)
+            if get_provider is not None:
+                try:
+                    provider = get_provider(provider_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[AI审核] 获取指定 Provider(%s) 异常：%s", provider_id, exc
+                    )
+                    provider = None
+                if provider is not None:
+                    return provider
+            message = (
+                f"[AI审核] 配置的 llm_provider_id={provider_id} 不存在，"
+                "已回退到会话默认模型。"
+            )
+            logger.warning(message)
+            await self._notify(message)
+        try:
+            return self._context.get_using_provider(umo)
+        except Exception as exc:
+            message = f"[AI审核] 获取对话模型 Provider 失败: {exc!s}"
+            logger.error(message, exc_info=True)
+            await self._notify(message)
+            return None
+
     async def _notify(self, message: str) -> None:
         """发送异常告警通知，失败不影响主流程。
 
@@ -114,17 +154,8 @@ class LLMClient:
             模型返回的纯文本；无可用模型或调用失败时返回 None。
         """
         self._sync_config()
-        try:
-            provider = self._context.get_using_provider(umo)
-        except Exception as exc:
-            message = f"[AI审核] 获取对话模型 Provider 失败: {exc!s}"
-            logger.error(message, exc_info=True)
-            await self._notify(message)
-            return None
+        provider = await self._resolve_provider(umo)
         if provider is None:
-            message = f"[AI审核] 未找到可用的对话模型 Provider（umo={umo}），本次审核已跳过。"
-            logger.error(message)
-            await self._notify(message)
             return None
         prompt = f"{user_prompt}\n\n{output_prompt}"
         async with self._semaphore:

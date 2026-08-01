@@ -72,6 +72,12 @@
     "hint": "同时进行的模型请求数上限",
     "default": 3
   },
+  "llm_provider_id": {
+    "type": "string",
+    "description": "审核使用的 AstrBot 模型 Provider ID",
+    "hint": "留空自动使用会话默认模型（随 /provider 切换变化）；填写 AstrBot 已接入的 Provider ID 可固定审核模型，如 auto_DeepSeek、default。可用 /review provider 查看",
+    "default": ""
+  },
   "llm_temperature": {
     "type": "float",
     "description": "AI 采样温度",
