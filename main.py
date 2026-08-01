@@ -88,6 +88,34 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         await self.workflow.load_state()
         self._spawn(self._sediment_push_loop())
 
+    @filter.command("review")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_review(
+        self,
+        event: AstrMessageEvent,
+        target: str = "",
+        sub: str = "",
+    ):
+        """AI 审核命令入口（逻辑见 commands.review._cmd_review）。
+
+        AstrBot 按 handler 的 __module__ 与插件主模块路径匹配来绑定插件实例，
+        因此指令入口必须定义在本文件（main.py），mixin 中的逻辑经此委托。
+        """
+        async for result in self._cmd_review(event, target, sub):
+            yield result
+
+    @filter.command("reviewconfig")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_reviewconfig(
+        self,
+        event: AstrMessageEvent,
+        key: str = "",
+        value: str = "",
+    ):
+        """查看或修改插件配置（逻辑见 commands.config._cmd_reviewconfig）。"""
+        async for result in self._cmd_reviewconfig(event, key, value):
+            yield result
+
     async def _sediment_push_loop(self) -> None:
         """定时向规则候选来源群推送待审批请求（每分钟检查一次）。"""
         while True:

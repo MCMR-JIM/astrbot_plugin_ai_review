@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import AstrMessageEvent
 
 from ..models import ReviewLog
 from ..utils.logger import log_review
@@ -31,15 +31,13 @@ _PER_PAGE = 10
 class ReviewCommandMixin:
     """/review 命令实现。"""
 
-    @filter.command("review")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def cmd_review(
+    async def _cmd_review(
         self,
         event: AstrMessageEvent,
         target: str = "",
         sub: str = "",
     ):
-        """AI 审核命令入口。"""
+        """AI 审核命令入口（由 main.py 的 cmd_review 委托调用）。"""
         cmd = (target or "").strip().lower()
         if cmd == "auto":
             sub_cmd = (sub or "").strip().lower()

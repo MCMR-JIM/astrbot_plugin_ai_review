@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import AstrMessageEvent
 
 from ..config import DEFAULT_CONFIG
 
@@ -15,15 +15,13 @@ from ..config import DEFAULT_CONFIG
 class ConfigCommandMixin:
     """/reviewconfig 命令实现。"""
 
-    @filter.command("reviewconfig")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def cmd_reviewconfig(
+    async def _cmd_reviewconfig(
         self,
         event: AstrMessageEvent,
         key: str = "",
         value: str = "",
     ):
-        """查看或修改插件配置。"""
+        """查看或修改插件配置（由 main.py 的 cmd_reviewconfig 委托调用）。"""
         if not key:
             yield event.plain_result(self._format_config())
             return
