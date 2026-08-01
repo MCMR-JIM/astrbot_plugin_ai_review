@@ -90,6 +90,12 @@ class ConfigManager:
             value = self._convert(DEFAULT_CONFIG[key], raw_value)
         except ValueError:
             return False, f"配置项 {key} 的值类型错误。"
+        if key == "review_mode" and str(value).lower() not in (
+            "active",
+            "passive",
+            "both",
+        ):
+            return False, "review_mode 只能是 active / passive / both 之一。"
         self._config[key] = value
         try:
             save = getattr(self._config, "save_config_async", None)

@@ -27,6 +27,15 @@ class ConfigCommandMixin:
         if not key:
             yield event.plain_result(self._format_config())
             return
+        # 命令参数按空白切分，JSON 等多词值可能被截断；
+        # 优先从原始消息中重建 key 之后的完整内容。
+        raw = (getattr(event, "message_str", "") or "").strip()
+        prefix = f"/reviewconfig {key}"
+        pos = raw.find(prefix)
+        if pos != -1:
+            reconstructed = raw[pos + len(prefix):].strip()
+            if reconstructed:
+                value = reconstructed
         ok, message = await self.config.set_value(key, value)
         prefix = "✅ 已更新：" if ok else "❌ "
         yield event.plain_result(prefix + message)

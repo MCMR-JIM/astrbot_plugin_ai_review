@@ -163,6 +163,8 @@ class ReviewCommandMixin:
         punisher = getattr(self, "punisher", None)
         if punisher is None:
             return "（未配置处罚执行器，仅记录通过）"
+        if not task.user_id:
+            return "（该任务无目标用户，仅记录通过，跳过处罚执行）"
         return await punisher.execute(task, admin_id)
 
     # ---------- 展示 ----------
