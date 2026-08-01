@@ -105,8 +105,34 @@
   "punish_pipeline": {
     "type": "object",
     "description": "处罚流水线映射",
-    "hint": "示例：{\"mute\": [\"warn\", \"mute\"]}，键为建议处罚，值为有序阶段列表（warn/mute/kick/ban/blacklist）",
-    "default": {}
+    "hint": "键为建议处罚，值为有序阶段列表（warn/mute/kick/ban/blacklist）。留空或删除某键将使用默认流水线",
+    "items": {
+      "warn": {
+        "type": "list",
+        "description": "警告处罚流水线",
+        "default": ["warn"]
+      },
+      "mute": {
+        "type": "list",
+        "description": "禁言处罚流水线",
+        "default": ["warn", "mute"]
+      },
+      "kick": {
+        "type": "list",
+        "description": "踢出处罚流水线",
+        "default": ["warn", "kick"]
+      },
+      "ban": {
+        "type": "list",
+        "description": "拉黑（长期禁言）处罚流水线",
+        "default": ["warn", "ban"]
+      },
+      "blacklist": {
+        "type": "list",
+        "description": "黑库同步处罚流水线",
+        "default": ["warn", "blacklist"]
+      }
+    }
   },
   "max_pending_per_user": {
     "type": "int",
