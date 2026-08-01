@@ -377,6 +377,8 @@ class ReviewLog:
     admin_id: str = ""
     punishment: str = ""
     blacklist_sync: str = ""
+    task_id: str = ""
+    llm_provider: str = ""
 
 
 @dataclass(slots=True)

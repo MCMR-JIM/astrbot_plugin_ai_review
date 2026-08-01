@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import time
 import types
@@ -36,6 +37,10 @@ from _plugin_under_test.review.rules import RuleEngine  # noqa: E402
 from _plugin_under_test.review.stats import StatsStore  # noqa: E402
 from _plugin_under_test.review.workflow import ReviewWorkflow  # noqa: E402
 from _plugin_under_test.utils.llm import LLMClient  # noqa: E402
+from _plugin_under_test.utils.logger import (  # noqa: E402
+    get_logger,
+    review_context,
+)
 from _plugin_under_test.utils.parser import parse_review_result  # noqa: E402
 
 
@@ -1053,6 +1058,63 @@ class RuleWorkflowTest(unittest.TestCase):
         message = rules.build_push_message()
         self.assertIn("待确认", message)
         self.assertIn("approve", message)
+
+
+class ReviewContextTest(unittest.TestCase):
+    """日志上下文追踪：审核流程内日志应带 request_id/群/用户 前缀。"""
+
+    def test_context_prefix_rendered(self) -> None:
+        captured: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda record: captured.append(record.getMessage())
+
+        logger = get_logger()
+        logger.setLevel(logging.DEBUG)
+        logger.logger.addHandler(handler)
+        try:
+            with review_context(group_id="g1", user_id="u1", task_id="t1"):
+                logger.info("审核开始")
+        finally:
+            logger.logger.removeHandler(handler)
+
+        self.assertEqual(len(captured), 1)
+        self.assertIn("[#", captured[0])
+        self.assertIn("群=g1", captured[0])
+        self.assertIn("用户=u1", captured[0])
+        self.assertIn("任务=t1", captured[0])
+        self.assertIn("审核开始", captured[0])
+
+    def test_no_context_no_prefix(self) -> None:
+        captured: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda record: captured.append(record.getMessage())
+
+        logger = get_logger()
+        logger.setLevel(logging.DEBUG)
+        logger.logger.addHandler(handler)
+        try:
+            logger.info("无上下文")
+        finally:
+            logger.logger.removeHandler(handler)
+
+        self.assertEqual(captured, ["无上下文"])
+
+    def test_context_reset_after_exit(self) -> None:
+        captured: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda record: captured.append(record.getMessage())
+
+        logger = get_logger()
+        logger.setLevel(logging.DEBUG)
+        logger.logger.addHandler(handler)
+        try:
+            with review_context(group_id="g1", user_id="u1"):
+                pass
+            logger.info("上下文已退出")
+        finally:
+            logger.logger.removeHandler(handler)
+
+        self.assertEqual(captured, ["上下文已退出"])
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from astrbot.api.event import AstrMessageEvent
 
 from ..models import ReviewLog
-from ..utils.logger import log_review
+from ..utils.logger import get_logger, log_event, log_review, review_context
 
 if TYPE_CHECKING:
     from ..models import ReviewTask
@@ -175,21 +175,30 @@ class ReviewCommandMixin:
             return self._format_detail(task)
         if cmd == "pass":
             return await self._approve_task(event, task)
-        rejected = await self.queue.reject(task_id, event.get_sender_id())
-        if rejected is None:
-            return "❌ 任务不存在或已处理。"
-        await self._record_decision(rejected, approved=False)
-        await self._feedback_rule(rejected, approved=False)
-        log_review(
-            ReviewLog(
-                group_id=rejected.group_id,
-                user_id=rejected.user_id,
-                risk=rejected.result.risk,
-                review_status="rejected",
-                admin_id=event.get_sender_id(),
+        with review_context(
+            group_id=task.group_id,
+            user_id=task.user_id,
+            task_id=task.task_id,
+            provider=task.llm_provider,
+        ):
+            rejected = await self.queue.reject(task_id, event.get_sender_id())
+            if rejected is None:
+                return "❌ 任务不存在或已处理。"
+            await self._record_decision(rejected, approved=False)
+            await self._feedback_rule(rejected, approved=False)
+            log_review(
+                ReviewLog(
+                    group_id=rejected.group_id,
+                    user_id=rejected.user_id,
+                    risk=rejected.result.risk,
+                    review_status="rejected",
+                    admin_id=event.get_sender_id(),
+                    task_id=rejected.task_id,
+                    llm_provider=rejected.llm_provider,
+                )
             )
-        )
-        return f"✅ 已拒绝任务 #{rejected.task_id}。"
+            log_event("review_rejected", admin_id=event.get_sender_id())
+            return f"✅ 已拒绝任务 #{rejected.task_id}。"
 
     async def _approve_task(self, event: AstrMessageEvent, task: "ReviewTask") -> str:
         """通过任务并执行处罚。"""
@@ -197,29 +206,42 @@ class ReviewCommandMixin:
         approved = await self.queue.approve(task.task_id, admin_id)
         if approved is None:
             return "❌ 任务已处理或已过期。"
-        punishment_msg = await self._execute_punishment(approved, admin_id)
-        await self._record_decision(approved, approved=True)
-        await self._feedback_rule(approved, approved=True)
-        # 非规则命中任务：异步提炼规则候选（进入待审批池）
-        rules = getattr(self, "rules", None)
-        if rules is not None and not approved.rule_id:
-            asyncio.create_task(
-                rules.collect_candidate(
-                    getattr(self, "llm", None),
-                    getattr(self, "prompt", None),
-                    approved,
+        with review_context(
+            group_id=approved.group_id,
+            user_id=approved.user_id,
+            task_id=approved.task_id,
+            provider=approved.llm_provider,
+        ):
+            punishment_msg = await self._execute_punishment(approved, admin_id)
+            await self._record_decision(approved, approved=True)
+            await self._feedback_rule(approved, approved=True)
+            # 非规则命中任务：异步提炼规则候选（进入待审批池）
+            rules = getattr(self, "rules", None)
+            if rules is not None and not approved.rule_id:
+                asyncio.create_task(
+                    rules.collect_candidate(
+                        getattr(self, "llm", None),
+                        getattr(self, "prompt", None),
+                        approved,
+                    )
+                )
+            log_review(
+                ReviewLog(
+                    group_id=approved.group_id,
+                    user_id=approved.user_id,
+                    risk=approved.result.risk,
+                    review_status="approved",
+                    admin_id=admin_id,
+                    punishment=approved.result.suggestion,
+                    task_id=approved.task_id,
+                    llm_provider=approved.llm_provider,
                 )
             )
-        log_review(
-            ReviewLog(
-                group_id=approved.group_id,
-                user_id=approved.user_id,
-                risk=approved.result.risk,
-                review_status="approved",
+            log_event(
+                "review_approved",
                 admin_id=admin_id,
                 punishment=approved.result.suggestion,
             )
-        )
         provider_note = (
             f"判定模型: {approved.llm_provider}"
             if approved.llm_provider

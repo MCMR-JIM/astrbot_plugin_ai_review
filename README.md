@@ -171,6 +171,21 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 重启后待处理任务不会丢失。任务数据支持 `max_pending_per_user` / `max_pending_total`
 上限治理，超过上限的新任务会被拒绝并记录日志。
 
+### 日志体系
+
+插件使用 AstrBot 插件专用日志器（`astrbot.plugin.astrbot_plugin_ai_review`），
+在 AstrBot 日志面板 / 控制台中以 `[插件名]` 标签显示，并支持按插件独立调节日志级别。
+
+- **上下文追踪**：每次审核流程（被动消息 → LLM → 任务生成 → 管理员处理）都会绑定一个
+  简短的 `request_id`，该流程内的所有日志自动附带 `[#abc123 群=xxx 用户=xxx 任务=xxx]` 前缀，
+  出问题时可按 request_id 串联整条链路排查。
+- **结构化事件**：关键节点以 `[事件] <event_name> key=value ...` 输出（如
+  `llm_call_ok` / `llm_call_failed` / `review_created` / `review_approved` / `review_rejected`），
+  便于在日志中按事件名检索过滤。
+- **结构化审核日志**：每次审核/处理通过 `log_review` 输出包含群号、用户、任务 ID、
+  判定模型、风险、结果、管理员、处罚、黑库同步状态等字段的完整记录。
+- **异常带栈**：所有后台任务与网络/解析异常均记录完整堆栈（`exc_info`），方便定位。
+
 ## 配置（后端配置操作）
 
 ### 配置方式一：AstrBot 管理面板（推荐）

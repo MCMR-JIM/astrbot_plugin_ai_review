@@ -10,7 +10,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, TYPE_CHECKING
 
-from .logger import get_logger
+from .logger import get_logger, log_event
 
 if TYPE_CHECKING:
     from astrbot.api.star import Context
@@ -164,6 +164,10 @@ class LLMClient:
         if provider is None:
             return None
         prompt = f"{user_prompt}\n\n{output_prompt}"
+        try:
+            provider_id = provider.meta().id
+        except Exception:
+            provider_id = ""
         async with self._semaphore:
             response = await self._chat_with_retry(
                 provider,
@@ -171,16 +175,24 @@ class LLMClient:
                 system_prompt,
             )
         if response is None:
+            log_event("llm_call_failed", provider=provider_id, umo=umo)
             logger.error("[AI审核] 模型返回为空，本次审核结束。")
             return None
         try:
             self._last_provider_id = provider.meta().id
         except Exception:
             self._last_provider_id = ""
+        log_event(
+            "llm_call_ok",
+            provider=provider_id,
+            chars=len(prompt),
+            umo=umo,
+        )
         completion = getattr(response, "completion_text", None)
         if completion is None and isinstance(response, str):
             completion = response
         if completion is None:
+            log_event("llm_response_empty", provider=provider_id)
             logger.error("[AI审核] 模型响应缺少文本内容，本次审核结束。")
             return None
         return completion or ""
