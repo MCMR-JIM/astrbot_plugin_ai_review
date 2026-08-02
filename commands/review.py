@@ -372,9 +372,15 @@ class ReviewCommandMixin:
         if not group_id:
             return "❌ 请在群内使用该命令。"
         raw = (getattr(event, "message_str", "") or "").strip()
-        prefix = "/review push"
-        pos = raw.find(prefix)
-        rest = raw[pos + len(prefix):].strip() if pos != -1 else sub
+        tokens = raw.split()
+        if (
+            len(tokens) >= 2
+            and tokens[0].lstrip("/").lower() == "review"
+            and tokens[1].lower() == "push"
+        ):
+            rest = " ".join(tokens[2:])
+        else:
+            rest = sub
         parts = rest.split()
         if not parts:
             return self._push_usage()
