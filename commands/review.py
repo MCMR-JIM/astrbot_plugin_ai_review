@@ -66,6 +66,10 @@ class ReviewCommandMixin:
             yield event.plain_result(
                 await self._handle_rule(event, (sub or "").strip())
             )
+        elif cmd == "push":
+            yield event.plain_result(
+                await self._handle_push(event, (sub or "").strip())
+            )
         elif cmd in ("detail", "pass", "reject"):
             yield event.plain_result(await self._handle_task(event, cmd, (sub or "").strip()))
         elif cmd.isdigit():
@@ -145,7 +149,7 @@ class ReviewCommandMixin:
         return "\n".join(lines)
 
     async def _format_list(self, event: AstrMessageEvent) -> str:
-        """格式化待审核任务列表。"""
+        """格式化待审核任务列表（每条内联同意/不同意命令）。"""
         tasks = await self.queue.list_pending(event.get_group_id())
         if not tasks:
             return "📋 当前没有待审核任务。"
@@ -157,9 +161,12 @@ class ReviewCommandMixin:
                 f"建议={task.result.suggestion}"
                 + (f" [{task.llm_provider}]" if task.llm_provider else "")
             )
+            lines.append(
+                f"✅ /review pass {task.task_id}  ❌ /review reject {task.task_id}"
+            )
         if len(tasks) > _PER_PAGE:
             lines.append(f"…共 {len(tasks)} 条")
-        lines.append("使用 /review detail <id> 查看详情，/review pass|reject <id> 处理。")
+        lines.append("查看聊天细节：/review detail <id>（合并转发展开）")
         return "\n".join(lines)
 
     async def _handle_task(self, event: AstrMessageEvent, cmd: str, task_id: str) -> str:
@@ -172,7 +179,7 @@ class ReviewCommandMixin:
         if task.group_id != event.get_group_id():
             return "❌ 该任务不属于当前群，请到对应群处理。"
         if cmd == "detail":
-            return self._format_detail(task)
+            return await self._send_task_detail(event, task)
         if cmd == "pass":
             return await self._approve_task(event, task)
         with review_context(
@@ -343,7 +350,7 @@ class ReviewCommandMixin:
 
     @staticmethod
     def _format_candidates(rules: Any) -> str:
-        """格式化待审批候选列表。"""
+        """格式化待审批候选列表（每条内联批准/拒绝命令）。"""
         candidates = rules.candidates()
         if not candidates:
             return "📥 当前没有待审批的规则候选。"
@@ -351,14 +358,80 @@ class ReviewCommandMixin:
         for candidate in candidates:
             lines.append(
                 f"#{candidate.candidate_id} [{candidate.note or candidate.pattern}]"
-                f" L{candidate.level}（来源群 {candidate.group_id}，"
-                f"任务 {candidate.source_task_id}）"
+                f" L{candidate.level}（来源群 {candidate.group_id}）"
             )
-        lines.append(
-            "使用 /review rule approve <id> 批准（进入观察期），"
-            "/review rule deny <id> 拒绝。"
-        )
+            lines.append(
+                f"✅ /review rule approve {candidate.candidate_id}"
+                f"  ❌ /review rule deny {candidate.candidate_id}"
+            )
         return "\n".join(lines)
+
+    async def _handle_push(self, event: AstrMessageEvent, sub: str) -> str:
+        """设置本群沉淀推送方式：/review push group|admin|off|view [QQ列表]。"""
+        group_id = event.get_group_id()
+        if not group_id:
+            return "❌ 请在群内使用该命令。"
+        raw = (getattr(event, "message_str", "") or "").strip()
+        prefix = "/review push"
+        pos = raw.find(prefix)
+        rest = raw[pos + len(prefix):].strip() if pos != -1 else sub
+        parts = rest.split()
+        if not parts:
+            return self._push_usage()
+        store = getattr(self, "_kv", None)
+        if store is None:
+            return "❌ 持久化存储不可用，无法设置推送配置。"
+        mode = parts[0].lower()
+        if mode == "view":
+            return self._format_push_view(group_id)
+        if mode in ("group", "off"):
+            ok, message = await self.config.set_override(
+                store, group_id, "regex_push_target", mode
+            )
+            return ("✅ " if ok else "❌ ") + message
+        if mode == "admin":
+            if len(parts) >= 2:
+                ok, message = await self.config.set_override(
+                    store, group_id, "regex_push_admin", parts[1]
+                )
+                if not ok:
+                    return "❌ " + message
+            ok, message = await self.config.set_override(
+                store, group_id, "regex_push_target", "admin"
+            )
+            return ("✅ " if ok else "❌ ") + message
+        return self._push_usage()
+
+    def _format_push_view(self, group_id: str) -> str:
+        """查看本群推送配置。"""
+        config = self.config.effective(group_id)
+        target = str(config.get("regex_push_target", "group"))
+        admin_ids = config.get("regex_push_admin") or self.config.get("admin_qq", [])
+        target_desc = {
+            "group": "推送到群聊天",
+            "admin": "私聊推送",
+            "off": "已关闭",
+        }.get(target, target)
+        lines = [
+            f"📤 本群推送配置（{group_id}）：",
+            f"• 推送目标：{target_desc}",
+            f"• 接收管理员：{', '.join(str(u) for u in admin_ids) or '（未配置）'}",
+            f"• 推送间隔：{config.get('regex_push_interval', 30)} 分钟",
+            f"• 合并转发阈值：{config.get('regex_forward_threshold', 3)} 条",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _push_usage() -> str:
+        """推送设置命令用法。"""
+        return (
+            "📤 推送设置（管理员，作用于当前群）\n"
+            "/review push group            群聊推送\n"
+            "/review push admin            私信推送（接收者=本群设置或全局 admin_qq）\n"
+            "/review push admin <QQ1,QQ2>  私信推送并指定接收管理员\n"
+            "/review push off              关闭自动推送\n"
+            "/review push view             查看本群推送配置"
+        )
 
     @staticmethod
     def _rule_usage() -> str:
@@ -434,13 +507,29 @@ class ReviewCommandMixin:
 
     # ---------- 展示 ----------
 
+    async def _send_task_detail(
+        self,
+        event: AstrMessageEvent,
+        task: "ReviewTask",
+    ) -> str:
+        """以合并转发发送任务详情（细节全齐）；转发失败回退文本。"""
+        executor = getattr(self, "executor", None)
+        if executor is None:
+            return self._format_detail(task)
+        items = [("AI 审核", str(event.get_self_id()), self._format_detail_summary(task))]
+        for index, record in enumerate(task.context, start=1):
+            items.append(
+                (record.nickname or "未知", record.user_id, record.to_prompt_line(index))
+            )
+        err = await executor.send_forward(event.unified_msg_origin, items)
+        if err:
+            logger.warning("[AI审核] 任务详情合并转发失败，回退文本：%s", err)
+            return self._format_detail(task)
+        return f"📄 已发送任务 #{task.task_id} 详情（合并转发，点击展开）。"
+
     @staticmethod
-    def _format_detail(task: "ReviewTask") -> str:
-        """格式化任务详情。"""
-        context_lines = "\n".join(
-            record.to_prompt_line(index)
-            for index, record in enumerate(task.context, start=1)
-        ) or "（无上下文）"
+    def _format_detail_summary(task: "ReviewTask") -> str:
+        """任务详情概要（不含聊天上下文，含同意/不同意命令）。"""
         evidence_lines = "\n".join(f"- {item}" for item in task.result.evidence) or "（无）"
         if task.llm_provider:
             source_line = f"判定模型: {task.llm_provider}"
@@ -458,6 +547,19 @@ class ReviewCommandMixin:
             f"建议处罚: {task.result.suggestion}\n"
             f"原因: {task.result.reason or '-'}\n"
             f"证据:\n{evidence_lines}\n"
+            f"✅ 同意：/review pass {task.task_id}\n"
+            f"❌ 不同意：/review reject {task.task_id}"
+        )
+
+    @staticmethod
+    def _format_detail(task: "ReviewTask") -> str:
+        """格式化任务详情（合并转发失败时的文本降级）。"""
+        context_lines = "\n".join(
+            record.to_prompt_line(index)
+            for index, record in enumerate(task.context, start=1)
+        ) or "（无上下文）"
+        return (
+            f"{ReviewCommandMixin._format_detail_summary(task)}\n"
             f"—— 聊天上下文 ——\n{context_lines}"
         )
 
@@ -476,6 +578,7 @@ class ReviewCommandMixin:
             "/review stats     查看本群违规统计\n"
             "/review stats all 查看全部群统计\n"
             "/review rule      管理正则规则（rule 查看详情）\n"
+            "/review push      设置推送方式（push 查看详情）\n"
             "/review detail <id>   查看详情\n"
             "/review pass <id>     通过并执行处罚\n"
             "/review reject <id>   拒绝任务"

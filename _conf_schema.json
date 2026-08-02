@@ -207,5 +207,11 @@
     "description": "私聊推送的管理员 QQ",
     "hint": "regex_push_target=admin 时生效；留空则使用全局 admin_qq",
     "default": []
+  },
+  "regex_forward_threshold": {
+    "type": "int",
+    "description": "合并转发阈值",
+    "hint": "推送/详情中候选或记录条数达到该值即打包为合并转发聊天记录，节约显示空间；0 表示始终用文本",
+    "default": 3
   }
 }
