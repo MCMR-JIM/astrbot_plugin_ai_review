@@ -192,15 +192,16 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
                         group_id,
                     )
                     continue
-                for admin_id in admin_ids:
+                for configured_admin_id in admin_ids:
+                    admin_id = str(configured_admin_id).strip()
                     session = f"{platform_id}:FriendMessage:{admin_id}"
-                    if str(admin_id) not in self._astrbot_admin_ids(session):
-                        if str(admin_id) not in skipped_admin_ids:
+                    if admin_id not in self._astrbot_admin_ids(session):
+                        if admin_id not in skipped_admin_ids:
                             logger.warning(
                                 "[AI审核] 接收者 %s 不是 AstrBot 管理员，跳过私聊推送。",
                                 admin_id,
                             )
-                            skipped_admin_ids.add(str(admin_id))
+                            skipped_admin_ids.add(admin_id)
                         continue
                     await self._push_candidates_to(
                         session,

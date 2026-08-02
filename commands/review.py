@@ -36,13 +36,16 @@ class ReviewCommandMixin:
         """Return the AstrBot administrators authorized for a session."""
         try:
             config = self.context.get_config(umo)
+            admin_ids = config.get("admins_id", [])
+            if not isinstance(admin_ids, (list, tuple, set, frozenset)):
+                return set()
+            return {
+                str(user_id).strip()
+                for user_id in admin_ids
+                if str(user_id).strip()
+            }
         except Exception:
             return set()
-        return {
-            str(user_id).strip()
-            for user_id in config.get("admins_id", [])
-            if str(user_id).strip()
-        }
 
     async def _cmd_review(
         self,
@@ -417,9 +420,15 @@ class ReviewCommandMixin:
                 }
             if not recipient_ids:
                 return "❌ 未配置私聊推送接收管理员。"
-            invalid_ids = recipient_ids - self._astrbot_admin_ids(
-                event.unified_msg_origin
-            )
+            platform_id = event.get_platform_id()
+            invalid_ids = {
+                recipient_id
+                for recipient_id in recipient_ids
+                if recipient_id
+                not in self._astrbot_admin_ids(
+                    f"{platform_id}:FriendMessage:{recipient_id}"
+                )
+            }
             if invalid_ids:
                 return (
                     "❌ 以下接收者不是 AstrBot 管理员："
