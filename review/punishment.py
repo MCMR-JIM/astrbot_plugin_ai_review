@@ -109,7 +109,11 @@ class PlatformExecutor:
             from astrbot.api.event import MessageChain
             from astrbot.api.message_components import Plain
 
-            await self._context.send_message(session, MessageChain([Plain(text)]))
+            sent = await self._context.send_message(
+                session, MessageChain([Plain(text)])
+            )
+            if sent is False:
+                return f"未找到会话对应的平台: {session}"
             return ""
         except Exception as exc:
             return f"发送消息失败: {exc!s}"
