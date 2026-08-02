@@ -124,8 +124,6 @@ _install_fake_astrbot(_FakeStar)
 
 # ---------- 导入真实插件模块 ----------
 from _plugin_under_test.main import AiReviewPlugin  # noqa: E402
-from _plugin_under_test.commands.review import ReviewCommandMixin  # noqa: E402
-from _plugin_under_test.models import ReviewResult  # noqa: E402
 
 
 # ---------- 模拟 AstrBot 运行时组件 ----------
@@ -297,6 +295,7 @@ async def run() -> None:
         {
             "regex_approval_permission": "group_admin",
             "regex_forward_threshold": 1,
+            "cooldown": 0,  # 冷却逻辑由单元测试覆盖，冒烟避免同 sender 连锁拦截
         },
     )
     # 注入 stub LLM：全程不经过 AI 提供商，判别文档由测试模拟
@@ -343,7 +342,6 @@ async def run() -> None:
             results.append(r)
         return results
 
-    from _plugin_under_test.commands.review import ReviewCommandMixin as _RCM
     list_result = (await cmd(FakeEvent("", message_str="/review list"), "list", ""))[0]
     list_text = list_result.message if hasattr(list_result, "message") else str(list_result)
     check("列表含审批内联", "✅ /review pass" in str(list_result))

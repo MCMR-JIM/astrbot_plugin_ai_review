@@ -46,16 +46,6 @@ class HistoryCache:
                 self._groups[group_id] = deque(dq, maxlen=new_maxlen)
             self._maxlen = new_maxlen
 
-    @property
-    def enabled(self) -> bool:
-        """缓存是否启用。"""
-        return self._enabled
-
-    @property
-    def group_ids(self) -> list[str]:
-        """当前缓存了记录的群号列表。"""
-        return list(self._groups.keys())
-
     def add(self, record: ChatRecord) -> None:
         """添加一条聊天记录。
 
@@ -113,14 +103,3 @@ class HistoryCache:
             records = records[-count:]
         return records
 
-    def clear(self, group_id: str) -> None:
-        """清空指定群的缓存。
-
-        Args:
-            group_id: 群号。
-        """
-        self._groups.pop(group_id, None)
-
-    def clear_all(self) -> None:
-        """清空全部群的缓存。"""
-        self._groups.clear()

@@ -155,11 +155,6 @@ class ReviewQueue:
             await self._save()
             return task
 
-    async def cleanup_expired(self) -> list[ReviewTask]:
-        """清理已超时的待处理任务。"""
-        async with self._lock:
-            return await self._cleanup_locked()
-
     async def pending_count(self) -> int:
         """当前待处理任务数（先清理过期）。"""
         async with self._lock:

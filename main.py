@@ -35,7 +35,7 @@ logger = get_logger()
 _PLUGIN_NAME = "astrbot_plugin_ai_review"
 _PLUGIN_AUTHOR = "Ni-ShuWu&kelai141"
 _PLUGIN_DESC = "基于 AstrBot 大模型的群聊 AI 审核助手，生成审核建议供管理员确认后执行处罚。"
-_PLUGIN_VERSION = "1.0.0"
+_PLUGIN_VERSION = "1.20"
 
 _PUSH_CHECK_INTERVAL = 60  # 推送循环检查间隔（秒）
 
@@ -66,6 +66,7 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         self.llm = LLMClient(context, get_config, notifier=self._notify_admin)
         self.stats = StatsStore(self._kv)
         self.rules = RuleEngine(self._kv, get_config, notifier=self._notify_admin)
+        self.executor = PlatformExecutor(context)  # 先于 workflow：供群主/群管免审注入
         self.workflow = ReviewWorkflow(
             self.history,
             self.prompt,
@@ -75,8 +76,8 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
             stats=self.stats,
             store=self._kv,
             rules=self.rules,
+            executor=self.executor,
         )
-        self.executor = PlatformExecutor(context)
         self.punisher = Punisher(self.executor, self.adapter, get_config)
         self._last_push_ts = 0.0
 
@@ -338,12 +339,17 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
                     continue
                 for admin_id in admin_ids:
                     try:
-                        await self.context.send_message(
+                        sent = await self.context.send_message(
                             f"{platform_id}:FriendMessage:{admin_id}",
                             chain,
                         )
                     except Exception:
                         continue
+                    if sent is False:  # 平台未找到，告警静默丢失（S2）
+                        logger.warning(
+                            "[AI审核] 管理员告警发送失败：未找到平台 %s",
+                            platform_id,
+                        )
         except Exception as exc:
             logger.error("[AI审核] 管理员通知发送失败：%s", exc, exc_info=True)
 

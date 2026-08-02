@@ -7,6 +7,9 @@ import time
 
 from .persistence import KVStore
 
+# 单用户违规类型键上限：LLM 自由文本类型无界增长，超出归入 other（S4）
+_MAX_TYPE_KEYS = 20
+
 
 class StatsStore:
     """按群/按用户聚合的违规统计。
@@ -43,6 +46,8 @@ class StatsStore:
             user["count"] = int(user.get("count", 0)) + 1
             types = user.setdefault("types", {})
             type_key = str(violation_type or "unknown")
+            if type_key not in types and len(types) >= _MAX_TYPE_KEYS:
+                type_key = "other"
             types[type_key] = int(types.get(type_key, 0)) + 1
             user["last_ts"] = time.time()
             await self._save()

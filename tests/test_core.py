@@ -30,7 +30,12 @@ from _plugin_under_test.config import ConfigManager  # noqa: E402
 from _plugin_under_test.models import ChatRecord, ReviewResult, ReviewTask  # noqa: E402
 from _plugin_under_test.prompt import PromptManager  # noqa: E402
 from _plugin_under_test.review.persistence import KVStore  # noqa: E402
-from _plugin_under_test.review.filters import to_record, trim_records  # noqa: E402
+from _plugin_under_test.review.filters import (  # noqa: E402
+    CooldownManager,
+    MessageFilters,
+    to_record,
+    trim_records,
+)
 from _plugin_under_test.review.history import HistoryCache  # noqa: E402
 from _plugin_under_test.review.punishment import Punisher  # noqa: E402
 from _plugin_under_test.review.queue import ReviewQueue  # noqa: E402
@@ -231,17 +236,37 @@ class PunisherHotReloadTest(unittest.TestCase):
             "punish_pipeline": {},
         }
         punisher = Punisher(None, None, lambda gid="": cfg)
-        self.assertEqual(punisher._stages["mute"]._duration, 600)
-        self.assertFalse(punisher._blacklist_enabled)
+        blacklist_enabled, mute_duration, pipelines = punisher._config_for("g1")
+        self.assertFalse(blacklist_enabled)
+        self.assertEqual(mute_duration, 600)
 
         cfg["mute_duration"] = 1200
         cfg["enable_blacklist"] = True
         cfg["punish_pipeline"] = {"mute": ["mute"]}
-        punisher._sync_config()
+        blacklist_enabled, mute_duration, pipelines = punisher._config_for("g1")
 
-        self.assertEqual(punisher._stages["mute"]._duration, 1200)
-        self.assertTrue(punisher._blacklist_enabled)
-        self.assertEqual(punisher._pipelines["mute"], ["mute"])
+        self.assertTrue(blacklist_enabled)
+        self.assertEqual(mute_duration, 1200)
+        self.assertEqual(pipelines["mute"], ["mute"])
+        self.assertEqual(
+            punisher._stage_for("mute", mute_duration)._duration, 1200
+        )
+
+    def test_group_configs_do_not_leak(self) -> None:
+        """按群覆盖互不污染（W2）：不同群禁言时长独立。"""
+        cfg = {"enable_blacklist": False, "mute_duration": 600, "punish_pipeline": {}}
+
+        def get_config(group_id: str = "") -> dict:
+            values = dict(cfg)
+            if group_id == "g1":
+                values["mute_duration"] = 1200
+            return values
+
+        punisher = Punisher(None, None, get_config)
+        _, duration_g1, _ = punisher._config_for("g1")
+        _, duration_g2, _ = punisher._config_for("g2")
+        self.assertEqual(duration_g1, 1200)
+        self.assertEqual(duration_g2, 600)
 
 
 class QueueTest(unittest.TestCase):
@@ -813,7 +838,7 @@ class PromptContentTest(unittest.TestCase):
         self.cfg = ConfigManager({})
         self.prompt = PromptManager(
             str(Path(__file__).resolve().parent.parent),
-            lambda gid="": self.cfg.raw,
+            lambda gid="": self.cfg.all(),
         )
 
     def test_system_contains_guardrails(self) -> None:
@@ -1347,6 +1372,134 @@ class ReviewTaskApprovalTest(unittest.TestCase):
             )
         )
         self.assertFalse(ok)
+
+
+
+class CooldownTimingTest(unittest.TestCase):
+    """W1: 冷却在 LLM 调用前记录，调用窗口内新消息被拦截。"""
+
+    def test_llm_failure_still_touches_cooldown(self) -> None:
+        class _FailingLLM:
+            last_provider_id = "stub"
+
+            async def chat(self, system, user, output, umo):
+                return None
+
+        cfg = {
+            "enable_passive_review": True,
+            "enable_history": True,
+            "review_mode": "both",
+            "risk_threshold": 80,
+            "history_count": 50,
+            "whitelist": [],
+            "min_msg_len": 2,
+            "cooldown": 300,
+            "review_timeout": 300,
+            "max_chat_chars": 3000,
+            "max_msg_chars": 200,
+            "max_pending_per_user": 2,
+            "max_pending_total": 200,
+            "enable_regex_prefilter": True,
+        }
+        history = HistoryCache(lambda gid="": cfg)
+        prompt = PromptManager(
+            str(Path(__file__).resolve().parent.parent),
+            lambda gid="": cfg,
+        )
+        queue = ReviewQueue()
+        workflow = ReviewWorkflow(
+            history, prompt, _FailingLLM(), queue, lambda gid="": cfg
+        )
+        asyncio.run(workflow.on_message(_StubGroupEvent()))
+        # 审核尝试后立即处于冷却中（即使 LLM 失败）
+        self.assertTrue(workflow._cooldown.in_cooldown("g1", "10001"))
+
+
+class GroupAdminExemptTest(unittest.TestCase):
+    """W3: 群主/群管发言免审（OneBot 群管判定 + 缓存）。"""
+
+    def test_moderator_skipped(self) -> None:
+        class _Exec:
+            def __init__(self):
+                self.calls = 0
+
+            async def is_group_moderator(self, platform_id, group_id, user_id):
+                self.calls += 1
+                return (True, "")
+
+        cfg = {"whitelist": [], "min_msg_len": 2, "cooldown": 300}
+        cooldown = CooldownManager(lambda gid="": cfg)
+        exec_ = _Exec()
+        filters = MessageFilters(lambda gid="": cfg, cooldown, exec_)
+        skip, reason = asyncio.run(filters.should_skip(_StubGroupEvent()))
+        self.assertTrue(skip)
+        self.assertEqual(reason, "群主/群管")
+
+    def test_regular_member_not_skipped(self) -> None:
+        class _Exec:
+            async def is_group_moderator(self, platform_id, group_id, user_id):
+                return (False, "")
+
+        cfg = {"whitelist": [], "min_msg_len": 2, "cooldown": 300}
+        filters = MessageFilters(
+            lambda gid="": cfg, CooldownManager(lambda gid="": cfg), _Exec()
+        )
+        skip, _ = asyncio.run(filters.should_skip(_StubGroupEvent()))
+        self.assertFalse(skip)
+
+    def test_second_moderator_in_window_also_skipped(self) -> None:
+        """F1 回归：缓存键按 (群, 用户)，窗口内第二个群管也被豁免。"""
+
+        class _Exec:
+            def __init__(self):
+                self.calls = 0
+
+            async def is_group_moderator(self, platform_id, group_id, user_id):
+                self.calls += 1
+                return (True, "")  # 双方都是群管
+
+        cfg = {"whitelist": [], "min_msg_len": 2, "cooldown": 300}
+        exec_ = _Exec()
+        filters = MessageFilters(
+            lambda gid="": cfg, CooldownManager(lambda gid="": cfg), exec_
+        )
+        event_a = _StubGroupEvent(sender_id="10001")
+        event_b = _StubGroupEvent(sender_id="10002")
+        skip_a, _ = asyncio.run(filters.should_skip(event_a))
+        skip_b, _ = asyncio.run(filters.should_skip(event_b))
+        self.assertTrue(skip_a)
+        self.assertTrue(skip_b)  # 第二群管不被 {A} 缓存误拒
+        self.assertEqual(exec_.calls, 2)  # 各自独立查询并缓存
+
+
+class ReDoSGuardTest(unittest.TestCase):
+    """W5: 嵌套量词正则被拒绝入库。"""
+
+    def test_nested_quantifier_rejected(self) -> None:
+        rules = RuleEngine(_FakeKV(), lambda gid="": _RULE_CFG)
+        ok, message, _ = asyncio.run(rules.add(r"(a+)+", source="manual"))
+        self.assertFalse(ok)
+        self.assertIn("嵌套量词", message)
+
+    def test_safe_pattern_accepted(self) -> None:
+        rules = RuleEngine(_FakeKV(), lambda gid="": _RULE_CFG)
+        ok, _, _ = asyncio.run(rules.add(r"(ab)+", source="manual"))
+        self.assertTrue(ok)
+
+
+class StatsTypeCapTest(unittest.TestCase):
+    """S4: 违规类型键超过上限归入 other。"""
+
+    def test_types_capped(self) -> None:
+        store = _FakeKV()
+        stats = StatsStore(store)
+        asyncio.run(stats.load())
+        for i in range(25):
+            asyncio.run(stats.record_violation("g1", "u1", f"type{i}"))
+        user = stats._data["g1"]["u1"]
+        self.assertLessEqual(len(user["types"]), 21)  # 20 类型 + other
+        self.assertIn("other", user["types"])
+        self.assertEqual(user["types"]["other"], 5)
 
 
 if __name__ == "__main__":

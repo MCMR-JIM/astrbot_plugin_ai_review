@@ -19,6 +19,11 @@ import asyncio
 import re
 import time
 import uuid
+
+try:
+    import re._parser as _sre_parse  # Python 3.11+
+except ImportError:  # pragma: no cover - Python 3.10 及更早
+    import re.sre_parse as _sre_parse  # type: ignore[no-redef]
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -40,6 +45,68 @@ _LEVEL_TO_SUGGESTION = {
 
 _MAX_PATTERN_LEN = 200
 _KV_KEY = "review_rules"
+
+# sre_parse 中的重复节点类型（+ * ? {m,n} 及懒量词）
+_REPEAT_OPS = (
+    _sre_parse.REPEAT,
+    _sre_parse.REPEAT_ONE,
+    _sre_parse.MAX_REPEAT,
+    _sre_parse.MIN_REPEAT,
+)
+
+
+def _contains_repeat(node: object) -> bool:
+    """递归检查解析树节点内是否含重复节点（用于嵌套量词检测）。"""
+    if isinstance(node, tuple) and node:
+        if node[0] in _REPEAT_OPS:
+            return True
+        return any(_contains_repeat(part) for part in node)
+    if isinstance(node, list):
+        return any(_contains_repeat(part) for part in node)
+    if isinstance(node, _sre_parse.SubPattern):  # Python 3.13+ parse 顶层
+        return any(_contains_repeat(part) for part in node.data)
+    return False
+
+
+def _walk(node: object):
+    """深度遍历解析树，产出全部节点（含嵌套子结构）。"""
+    if isinstance(node, tuple) and node:
+        yield node
+        for part in node[1:]:
+            yield from _walk(part)
+    elif isinstance(node, list):
+        for part in node:
+            yield from _walk(part)
+    elif isinstance(node, _sre_parse.SubPattern):  # Python 3.13+ parse 顶层
+        for part in node.data:
+            yield from _walk(part)
+
+
+def _reject_catastrophic(pattern: str) -> None:
+    """拒绝嵌套量词（如 `(a+)+`、`(a*)*`）——灾难性回溯风险（W5）。
+
+    Args:
+        pattern: 正则原文。
+
+    Raises:
+        ValueError: 检测到嵌套量词时。
+    """
+    try:
+        parsed = _sre_parse.parse(pattern)
+    except re.error as exc:
+        raise ValueError(f"正则表达式非法: {exc}") from exc
+    for node in _walk(parsed):
+        if not (isinstance(node, tuple) and node):
+            continue
+        op = node[0]
+        if op not in _REPEAT_OPS:
+            continue
+        args = node[1] if len(node) > 1 else None
+        inner = args[2] if isinstance(args, tuple) and len(args) > 2 else None
+        if inner is not None and _contains_repeat(inner):
+            raise ValueError(
+                "正则包含嵌套量词（如 (a+)+），存在灾难性回溯风险，已拒绝。"
+            )
 _CANDIDATE_KV_KEY = "rule_candidates"
 _DAYS_TO_SECONDS = 86400
 
@@ -127,7 +194,7 @@ class RuleEngine:
                 logger.warning("[AI审核] 规则 %s 编译失败，已跳过匹配：%s", rule_id, rule.pattern)
 
     def _compile(self, pattern: str) -> re.Pattern:
-        """编译正则表达式。
+        """编译正则表达式（含嵌套量词 ReDoS 校验）。
 
         Args:
             pattern: 正则原文。
@@ -136,10 +203,11 @@ class RuleEngine:
             编译后的 Pattern。
 
         Raises:
-            ValueError: 表达式非法或超出长度限制。
+            ValueError: 表达式非法、超出长度限制或含嵌套量词。
         """
         if not pattern or len(pattern) > _MAX_PATTERN_LEN:
             raise ValueError(f"正则长度需在 1~{_MAX_PATTERN_LEN} 字符之间")
+        _reject_catastrophic(pattern)
         try:
             return re.compile(pattern)
         except re.error as exc:
