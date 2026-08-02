@@ -84,6 +84,7 @@ _OVERRIDE_KEYS = frozenset(
         "regex_sediment",
         "regex_push_target",
         "regex_push_admin",
+        "regex_forward_threshold",
     }
 )
 
