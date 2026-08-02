@@ -156,6 +156,38 @@ class PlatformExecutor:
         except Exception as exc:
             return f"合并转发发送失败: {exc!s}"
 
+    async def is_group_moderator(
+        self,
+        platform_id: str,
+        group_id: str,
+        user_id: str,
+    ) -> tuple[bool, str]:
+        """Return whether the current OneBot member role can manage the group."""
+        try:
+            adapter = self._context.get_platform_inst(platform_id)
+            if adapter is None:
+                return False, f"未找到平台实例 {platform_id}"
+            client = getattr(adapter, "get_client", None)
+            bot = client() if callable(client) else getattr(adapter, "bot", None)
+            if bot is None or not hasattr(bot, "call_action"):
+                return False, f"平台 {platform_id} 不支持获取群成员信息"
+            member = await bot.call_action(
+                action="get_group_member_info",
+                group_id=group_id,
+                user_id=user_id,
+                no_cache=True,
+            )
+        except Exception as exc:
+            return False, f"获取群成员信息失败: {exc!s}"
+        if not isinstance(member, dict):
+            return False, "群成员信息格式错误"
+        role = member.get("role")
+        if role in {"owner", "admin"}:
+            return True, ""
+        if not isinstance(role, str):
+            return False, "群成员角色缺失"
+        return False, f"群成员角色无权限: {role}"
+
     async def _call(self, platform_id: str, action: str, **params: Any) -> str:
         """调用平台 OneBot 动作。
 

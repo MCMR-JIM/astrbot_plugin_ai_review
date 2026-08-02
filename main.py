@@ -100,7 +100,6 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
             await asyncio.gather(*tasks, return_exceptions=True)
 
     @filter.command("review")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_review(
         self,
         event: AstrMessageEvent,
@@ -112,6 +111,20 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         AstrBot 按 handler 的 __module__ 与插件主模块路径匹配来绑定插件实例，
         因此指令入口必须定义在本文件（main.py），mixin 中的逻辑经此委托。
         """
+        try:
+            allowed = bool(event.is_admin())
+        except Exception:
+            allowed = False
+        if not allowed:
+            parts = (
+                self._rule_command_parts(event, sub)
+                if (target or "").strip().lower() == "rule"
+                else ()
+            )
+            allowed = await self._can_manage_rule_candidate(event, parts)
+        if not allowed:
+            yield event.plain_result("❌ 权限不足。")
+            return
         async for result in self._cmd_review(event, target, sub):
             yield result
 
@@ -160,26 +173,22 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         candidates = self.rules.candidates()
         if not candidates:
             return
-        by_group: dict[str, list[Any]] = {}
+        by_destination: dict[tuple[str, str], list[Any]] = {}
         for candidate in candidates:
-            by_group.setdefault(candidate.group_id or "?", []).append(candidate)
-        for group_id, group_candidates in by_group.items():
+            platform_id = str(getattr(candidate, "platform_id", "")).strip()
+            group_id = str(getattr(candidate, "group_id", "")).strip()
+            if not platform_id or not group_id:
+                logger.warning(
+                    "[AI审核] 候选 %s 缺少平台或群信息，跳过推送。",
+                    getattr(candidate, "candidate_id", "?"),
+                )
+                continue
+            by_destination.setdefault((platform_id, group_id), []).append(candidate)
+        skipped_admin_ids: set[str] = set()
+        for (platform_id, group_id), group_candidates in by_destination.items():
             config = self._get_config(group_id)
             target = str(config.get("regex_push_target", "group")).lower()
             if target == "off":
-                continue
-            platform_id = next(
-                (
-                    candidate.platform_id
-                    for candidate in group_candidates
-                    if candidate.platform_id
-                ),
-                None,
-            )
-            if not platform_id:
-                logger.warning(
-                    "[AI审核] 群 %s 的候选缺少平台信息，跳过推送。", group_id
-                )
                 continue
             if target == "admin":
                 admin_ids = config.get("regex_push_admin") or self.config.get(
@@ -191,9 +200,33 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
                         group_id,
                     )
                     continue
-                for admin_id in admin_ids:
+                permission = str(
+                    config.get("regex_approval_permission", "astrbot_admin")
+                ).lower()
+                for configured_admin_id in admin_ids:
+                    admin_id = str(configured_admin_id).strip()
+                    session = f"{platform_id}:FriendMessage:{admin_id}"
+                    if permission == "group_admin":
+                        try:
+                            allowed, _error = await self.executor.is_group_moderator(
+                                platform_id,
+                                group_id,
+                                admin_id,
+                            )
+                        except Exception:
+                            allowed = False
+                    else:
+                        allowed = admin_id in self._astrbot_admin_ids(session)
+                    if not allowed:
+                        if admin_id not in skipped_admin_ids:
+                            logger.warning(
+                                "[AI审核] 接收者 %s 不具备当前审批权限，跳过私聊推送。",
+                                admin_id,
+                            )
+                            skipped_admin_ids.add(admin_id)
+                        continue
                     await self._push_candidates_to(
-                        f"{platform_id}:FriendMessage:{admin_id}",
+                        session,
                         group_candidates,
                         group_id,
                         config,
