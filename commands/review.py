@@ -109,6 +109,42 @@ class ReviewCommandMixin:
             return ()
         return tuple((sub or "").split())
 
+    async def _can_approve_task(
+        self,
+        event: AstrMessageEvent,
+        task_id: str,
+    ) -> bool:
+        """授权非 AstrBot 管理员执行 pass/reject（审核任务审批）。
+
+        要求：任务属于当前群、该群配置 regex_approval_permission=group_admin、
+        发送者是该群群主/群管。补全"群管审批"闭环：规则候选与审核任务
+        均可由本群群管处理。
+        """
+        try:
+            task = await self.queue.get(task_id)
+            if task is None or not task_id:
+                return False
+            if task.group_id != event.get_group_id():
+                return False
+            permission = str(
+                self._get_config(task.group_id).get(
+                    "regex_approval_permission", "astrbot_admin"
+                )
+            ).lower()
+            if permission != "group_admin":
+                return False
+            executor = getattr(self, "executor", None)
+            if executor is None:
+                return False
+            allowed, _error = await executor.is_group_moderator(
+                event.get_platform_id(),
+                task.group_id,
+                event.get_sender_id(),
+            )
+            return bool(allowed)
+        except Exception:
+            return False
+
     async def _can_manage_rule_candidate(
         self,
         event: AstrMessageEvent,

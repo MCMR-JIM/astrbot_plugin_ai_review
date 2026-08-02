@@ -12,6 +12,7 @@ import sys
 import time
 import types
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 # 以固定别名的命名空间包方式导入插件源码，与仓库目录名解耦：
@@ -1276,6 +1277,76 @@ class OutputFormatTest(unittest.TestCase):
         self.assertEqual(cfg.get("regex_forward_threshold"), 5)
         ok, _ = asyncio.run(cfg.set_value("regex_forward_threshold", "0"))
         self.assertTrue(ok)  # 0 = 始终文本
+
+
+class ReviewTaskApprovalTest(unittest.TestCase):
+    """/review pass|reject 群管授权：group_admin 模式下本群群管可审批任务。"""
+
+    @staticmethod
+    def _make_mixin(
+        permission: str = "group_admin",
+        moderator: bool = True,
+        task_group: str = "g1",
+        event_group: str = "g1",
+    ) -> ReviewCommandMixin:
+        mixin = object.__new__(ReviewCommandMixin)
+        queue = ReviewQueue()
+        task = _make_task(group_id=task_group, user_id="u1")
+        asyncio.run(queue.add(task))
+        mixin.queue = queue
+        mixin._task_id = task.task_id
+
+        class _Executor:
+            async def is_group_moderator(self, platform_id, group_id, user_id):
+                return (moderator, "")
+
+        mixin.executor = _Executor()
+        mixin._get_config = lambda gid="": {
+            "regex_approval_permission": permission,
+        }
+        return mixin
+
+    def _approve(self, mixin: ReviewCommandMixin, group: str = "g1") -> bool:
+        return asyncio.run(
+            mixin._can_approve_task(
+                SimpleNamespace(
+                    get_group_id=lambda: group,
+                    get_platform_id=lambda: "aiocqhttp",
+                    get_sender_id=lambda: "10001",
+                ),
+                mixin._task_id,
+            )
+        )
+
+    def test_group_admin_mode_moderator_allowed(self) -> None:
+        mixin = self._make_mixin(permission="group_admin", moderator=True)
+        self.assertTrue(self._approve(mixin))
+
+    def test_group_admin_mode_regular_member_denied(self) -> None:
+        mixin = self._make_mixin(permission="group_admin", moderator=False)
+        self.assertFalse(self._approve(mixin))
+
+    def test_default_mode_denies_moderator(self) -> None:
+        mixin = self._make_mixin(permission="astrbot_admin", moderator=True)
+        self.assertFalse(self._approve(mixin))
+
+    def test_task_of_other_group_denied(self) -> None:
+        mixin = self._make_mixin(task_group="g2")
+        self.assertFalse(self._approve(mixin, group="g1"))
+
+    def test_missing_task_denied(self) -> None:
+        mixin = self._make_mixin()
+        ok = asyncio.run(
+            mixin._can_approve_task(
+                SimpleNamespace(
+                    get_group_id=lambda: "g1",
+                    get_platform_id=lambda: "aiocqhttp",
+                    get_sender_id=lambda: "10001",
+                ),
+                "no-such-task",
+            )
+        )
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

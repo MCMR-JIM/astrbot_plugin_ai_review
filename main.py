@@ -110,18 +110,24 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
 
         AstrBot 按 handler 的 __module__ 与插件主模块路径匹配来绑定插件实例，
         因此指令入口必须定义在本文件（main.py），mixin 中的逻辑经此委托。
+        权限：AstrBot 管理员放行；群管模式下（regex_approval_permission=
+        group_admin）本群群主/群管可审批规则候选（rule approve/deny）与
+        审核任务（pass/reject）。
         """
         try:
             allowed = bool(event.is_admin())
         except Exception:
             allowed = False
         if not allowed:
+            command = (target or "").strip().lower()
             parts = (
                 self._rule_command_parts(event, sub)
-                if (target or "").strip().lower() == "rule"
+                if command == "rule"
                 else ()
             )
             allowed = await self._can_manage_rule_candidate(event, parts)
+            if not allowed and command in ("pass", "reject"):
+                allowed = await self._can_approve_task(event, (sub or "").strip())
         if not allowed:
             yield event.plain_result("❌ 权限不足。")
             return
