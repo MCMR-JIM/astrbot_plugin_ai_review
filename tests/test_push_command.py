@@ -46,11 +46,17 @@ class PushCommandTest(unittest.TestCase):
         self.command = object.__new__(ReviewCommandMixin)
         self.command.config = self.config
         self.command._kv = object()
+        # #16 合入后 _handle_push 校验接收者必须是 AstrBot 管理员；
+        # 测试的接收者均视为管理员，聚焦命令解析行为
+        self.command.context = SimpleNamespace(
+            get_config=lambda umo: {"admins_id": ["10001", "10002", "10003", "10004"]}
+        )
 
     def test_prefix_stripped_admin_command_preserves_qq_list(self) -> None:
         event = SimpleNamespace(
             message_str="review push admin 10001,10002",
             get_group_id=lambda: "g1",
+            get_platform_id=lambda: "aiocqhttp",
         )
 
         asyncio.run(self.command._handle_push(event, "admin"))
@@ -64,6 +70,7 @@ class PushCommandTest(unittest.TestCase):
         event = SimpleNamespace(
             message_str="/review push admin 10003,10004",
             get_group_id=lambda: "g1",
+            get_platform_id=lambda: "aiocqhttp",
         )
 
         asyncio.run(self.command._handle_push(event, "admin"))
