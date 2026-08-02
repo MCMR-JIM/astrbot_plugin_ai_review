@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 from astrbot.api.event import AstrMessageEvent
@@ -216,15 +215,18 @@ class ReviewCommandMixin:
             await self._record_decision(approved, approved=True)
             await self._feedback_rule(approved, approved=True)
             # 非规则命中任务：异步提炼规则候选（进入待审批池）
+            # 走受管 _spawn：插件卸载时被 terminate() 取消，不悬挂
             rules = getattr(self, "rules", None)
             if rules is not None and not approved.rule_id:
-                asyncio.create_task(
-                    rules.collect_candidate(
-                        getattr(self, "llm", None),
-                        getattr(self, "prompt", None),
-                        approved,
+                spawn = getattr(self, "_spawn", None)
+                if spawn is not None:
+                    spawn(
+                        rules.collect_candidate(
+                            getattr(self, "llm", None),
+                            getattr(self, "prompt", None),
+                            approved,
+                        )
                     )
-                )
             log_review(
                 ReviewLog(
                     group_id=approved.group_id,
