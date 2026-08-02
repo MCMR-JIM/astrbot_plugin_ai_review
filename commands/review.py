@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At
 
+from ..config import safe_int
 from ..models import ReviewLog
 from ..utils.logger import get_logger, log_event, log_review, review_context
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from ..models import ReviewTask
 
 _PER_PAGE = 10
+logger = get_logger()
 
 
 class ReviewCommandMixin:
@@ -628,6 +630,10 @@ class ReviewCommandMixin:
         task: "ReviewTask",
     ) -> str:
         """以合并转发发送任务详情（细节全齐）；转发失败回退文本。"""
+        config = self.config.effective(task.group_id)
+        threshold = safe_int(config.get("regex_forward_threshold"), 3)
+        if threshold <= 0 or len(task.context) < threshold:
+            return self._format_detail(task)
         executor = getattr(self, "executor", None)
         if executor is None:
             return self._format_detail(task)
