@@ -24,6 +24,13 @@ except ModuleNotFoundError as exc:
         raise
     AiReviewPlugin = None
 
+try:
+    from astrbot.core.star.filter.permission import PermissionTypeFilter
+    from astrbot.core.star.star_handler import star_handlers_registry
+except ImportError:
+    PermissionTypeFilter = None
+    star_handlers_registry = None
+
 from _plugin_under_test.config import ConfigManager
 
 
@@ -91,16 +98,18 @@ class _Event:
         *,
         admin: bool = False,
         sender_id: str = "10001",
+        platform_id: str = "platform",
     ) -> None:
         self.message_str = message_str
         self.admin = admin
         self.sender_id = sender_id
+        self.platform_id = platform_id
 
     def get_group_id(self) -> str:
         return "30003"
 
     def get_platform_id(self) -> str:
-        return "platform"
+        return self.platform_id
 
     def get_sender_id(self) -> str:
         return self.sender_id
@@ -512,6 +521,86 @@ class PushRecipientAuthorizationTest(unittest.TestCase):
             ],
         )
 
+    def test_runtime_separates_same_group_candidates_by_platform(self) -> None:
+        candidates = [
+            self._candidate("platform-a-candidate", platform_id="platform-a"),
+            self._candidate("platform-b-candidate", platform_id="platform-b"),
+        ]
+        plugin = object.__new__(AiReviewPlugin)
+        plugin.context = _Context([])
+        plugin.config = _Config(global_admins=[])
+        plugin.rules = _CandidateRules(candidates)
+        plugin._get_config = lambda _group_id: {
+            "regex_push_target": "admin",
+            "regex_push_admin": ["10001"],
+            "regex_approval_permission": "group_admin",
+        }
+        plugin.executor = _RoleExecutor(
+            {
+                ("platform-a", "30003", "10001"): "owner",
+                ("platform-b", "30003", "10001"): "admin",
+            }
+        )
+        batches: list[tuple[str, list[str]]] = []
+
+        async def record_push(session: str, batch: list[object], *_args) -> None:
+            batches.append(
+                (session, [candidate.candidate_id for candidate in batch])
+            )
+
+        plugin._push_candidates_to = record_push
+
+        asyncio.run(plugin._push_rule_candidates())
+
+        self.assertEqual(
+            batches,
+            [
+                (
+                    "platform-a:FriendMessage:10001",
+                    ["platform-a-candidate"],
+                ),
+                (
+                    "platform-b:FriendMessage:10001",
+                    ["platform-b-candidate"],
+                ),
+            ],
+        )
+        self.assertEqual(
+            plugin.executor.calls,
+            [
+                ("platform-a", "30003", "10001"),
+                ("platform-b", "30003", "10001"),
+            ],
+        )
+
+    def test_runtime_skips_candidates_missing_platform_or_group(self) -> None:
+        candidates = [
+            self._candidate("missing-platform", platform_id=""),
+            self._candidate("missing-group", group_id=""),
+            self._candidate("valid"),
+        ]
+        plugin = object.__new__(AiReviewPlugin)
+        plugin.context = _Context(["10001"])
+        plugin.config = _Config(global_admins=[])
+        plugin.rules = _CandidateRules(candidates)
+        plugin._get_config = lambda _group_id: {
+            "regex_push_target": "admin",
+            "regex_push_admin": ["10001"],
+            "regex_approval_permission": "astrbot_admin",
+        }
+        batches: list[list[str]] = []
+
+        async def record_push(_session: str, batch: list[object], *_args) -> None:
+            batches.append([candidate.candidate_id for candidate in batch])
+
+        plugin._push_candidates_to = record_push
+
+        with self.assertLogs("astrbot", level="WARNING") as logs:
+            asyncio.run(plugin._push_rule_candidates())
+
+        self.assertEqual(batches, [["valid"]])
+        self.assertEqual(sum("缺少平台或群信息" in line for line in logs.output), 2)
+
     @staticmethod
     def _candidate(
         candidate_id: str = "candidate-1",
@@ -621,6 +710,24 @@ class PushRecipientAuthorizationTest(unittest.TestCase):
             [("platform", "40004", "10001")],
         )
 
+    def test_group_manager_is_denied_for_candidate_on_other_platform(self) -> None:
+        role_key = ("platform", "30003", "10001")
+        for event_platform in ("other-platform", ""):
+            with self.subTest(event_platform=event_platform):
+                plugin, delegated = self._gate_plugin(
+                    roles={role_key: "owner"}
+                )
+                event = _Event(
+                    "/review rule approve candidate-1",
+                    platform_id=event_platform,
+                )
+
+                result = self._run_cmd(plugin, event, "rule", "approve")
+
+                self.assertIn("权限不足", result[0])
+                self.assertEqual(delegated, [])
+                self.assertEqual(plugin.executor.calls, [])
+
     def test_group_manager_role_revocation_is_effective_immediately(self) -> None:
         role_key = ("platform", "30003", "10001")
         plugin, delegated = self._gate_plugin(roles={role_key: "owner"})
@@ -670,6 +777,11 @@ class PushRecipientAuthorizationTest(unittest.TestCase):
             ("reject", "task-1", "/review reject task-1"),
             ("auto", "on", "/review auto on"),
             ("config", "x", "/review config x"),
+            ("recent", "", "/review recent"),
+            ("provider", "", "/review provider"),
+            ("stats", "all", "/review stats all"),
+            ("detail", "task-1", "/review detail task-1"),
+            ("10001", "", "/review 10001"),
             ("rule", "list", "/review rule list"),
             ("rule", "approve", "/review rule approve"),
             ("rule", "approve", "/review rule approve missing"),
@@ -682,6 +794,29 @@ class PushRecipientAuthorizationTest(unittest.TestCase):
                 self.assertIn("权限不足", result[0])
 
         self.assertEqual(delegated, [])
+
+    @unittest.skipIf(
+        star_handlers_registry is None,
+        "real AstrBot handler registry is not installed",
+    )
+    def test_only_reviewconfig_retains_admin_filter_metadata(self) -> None:
+        def permission_filters(method) -> list[object]:
+            full_name = f"{method.__module__}_{method.__name__}"
+            metadata = star_handlers_registry.get_handler_by_full_name(full_name)
+            self.assertIsNotNone(metadata)
+            return [
+                item
+                for item in metadata.event_filters
+                if isinstance(item, PermissionTypeFilter)
+            ]
+
+        self.assertEqual(permission_filters(AiReviewPlugin.cmd_review), [])
+        reviewconfig_filters = permission_filters(AiReviewPlugin.cmd_reviewconfig)
+        self.assertEqual(len(reviewconfig_filters), 1)
+        self.assertEqual(
+            reviewconfig_filters[0].permission_type.name,
+            "ADMIN",
+        )
 
     def test_group_manager_denies_candidate_missing_platform_or_group(self) -> None:
         for candidate in (

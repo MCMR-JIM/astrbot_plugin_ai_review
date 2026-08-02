@@ -173,27 +173,22 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         candidates = self.rules.candidates()
         if not candidates:
             return
-        by_group: dict[str, list[Any]] = {}
+        by_destination: dict[tuple[str, str], list[Any]] = {}
         for candidate in candidates:
-            by_group.setdefault(candidate.group_id or "?", []).append(candidate)
+            platform_id = str(getattr(candidate, "platform_id", "")).strip()
+            group_id = str(getattr(candidate, "group_id", "")).strip()
+            if not platform_id or not group_id:
+                logger.warning(
+                    "[AI审核] 候选 %s 缺少平台或群信息，跳过推送。",
+                    getattr(candidate, "candidate_id", "?"),
+                )
+                continue
+            by_destination.setdefault((platform_id, group_id), []).append(candidate)
         skipped_admin_ids: set[str] = set()
-        for group_id, group_candidates in by_group.items():
+        for (platform_id, group_id), group_candidates in by_destination.items():
             config = self._get_config(group_id)
             target = str(config.get("regex_push_target", "group")).lower()
             if target == "off":
-                continue
-            platform_id = next(
-                (
-                    candidate.platform_id
-                    for candidate in group_candidates
-                    if candidate.platform_id
-                ),
-                None,
-            )
-            if not platform_id:
-                logger.warning(
-                    "[AI审核] 群 %s 的候选缺少平台信息，跳过推送。", group_id
-                )
                 continue
             if target == "admin":
                 admin_ids = config.get("regex_push_admin") or self.config.get(

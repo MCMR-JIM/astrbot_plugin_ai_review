@@ -133,6 +133,9 @@ class ReviewCommandMixin:
             group_id = str(getattr(candidate, "group_id", "")).strip()
             if not platform_id or not group_id:
                 return False
+            event_platform_id = str(event.get_platform_id() or "").strip()
+            if event_platform_id != platform_id:
+                return False
             permission = str(
                 self._get_config(group_id).get(
                     "regex_approval_permission", "astrbot_admin"

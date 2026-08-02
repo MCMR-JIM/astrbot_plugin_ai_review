@@ -47,6 +47,8 @@ class _Bot:
         self.calls.append(params)
         if self.error is not None:
             raise self.error
+        if isinstance(self.result, list):
+            return self.result.pop(0)
         return self.result
 
 
@@ -125,6 +127,7 @@ class PlatformExecutorGroupModeratorTest(unittest.TestCase):
                             "action": "get_group_member_info",
                             "group_id": "30003",
                             "user_id": "10001",
+                            "no_cache": True,
                         }
                     ],
                 )
@@ -139,6 +142,37 @@ class PlatformExecutorGroupModeratorTest(unittest.TestCase):
                 )
                 self.assertFalse(allowed)
                 self.assertTrue(error)
+
+    def test_rechecks_role_without_cache_after_revocation(self) -> None:
+        bot = _Bot([{"role": "owner"}, {"role": "member"}])
+        executor = PlatformExecutor(_RoleContext(_Adapter(bot)))
+
+        before = asyncio.run(
+            executor.is_group_moderator("platform", "30003", "10001")
+        )
+        after = asyncio.run(
+            executor.is_group_moderator("platform", "30003", "10001")
+        )
+
+        self.assertEqual(before, (True, ""))
+        self.assertFalse(after[0])
+        self.assertEqual(
+            bot.calls,
+            [
+                {
+                    "action": "get_group_member_info",
+                    "group_id": "30003",
+                    "user_id": "10001",
+                    "no_cache": True,
+                },
+                {
+                    "action": "get_group_member_info",
+                    "group_id": "30003",
+                    "user_id": "10001",
+                    "no_cache": True,
+                },
+            ],
+        )
 
     def test_contains_missing_platform_client_and_onebot_errors(self) -> None:
         contexts = (

@@ -175,6 +175,7 @@ class PlatformExecutor:
                 action="get_group_member_info",
                 group_id=group_id,
                 user_id=user_id,
+                no_cache=True,
             )
         except Exception as exc:
             return False, f"获取群成员信息失败: {exc!s}"
