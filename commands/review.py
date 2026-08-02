@@ -32,6 +32,18 @@ _PER_PAGE = 10
 class ReviewCommandMixin:
     """/review 命令实现。"""
 
+    def _astrbot_admin_ids(self, umo: str) -> set[str]:
+        """Return the AstrBot administrators authorized for a session."""
+        try:
+            config = self.context.get_config(umo)
+        except Exception:
+            return set()
+        return {
+            str(user_id).strip()
+            for user_id in config.get("admins_id", [])
+            if str(user_id).strip()
+        }
+
     async def _cmd_review(
         self,
         event: AstrMessageEvent,
@@ -390,7 +402,30 @@ class ReviewCommandMixin:
             )
             return ("✅ " if ok else "❌ ") + message
         if mode == "admin":
-            if len(parts) >= 2:
+            explicit_recipients = len(parts) >= 2
+            if explicit_recipients:
+                recipient_ids = {
+                    item.strip() for item in parts[1].split(",") if item.strip()
+                }
+            else:
+                effective = self.config.effective(group_id)
+                configured = effective.get("regex_push_admin") or self.config.get(
+                    "admin_qq", []
+                )
+                recipient_ids = {
+                    str(item).strip() for item in configured if str(item).strip()
+                }
+            if not recipient_ids:
+                return "❌ 未配置私聊推送接收管理员。"
+            invalid_ids = recipient_ids - self._astrbot_admin_ids(
+                event.unified_msg_origin
+            )
+            if invalid_ids:
+                return (
+                    "❌ 以下接收者不是 AstrBot 管理员："
+                    + ", ".join(sorted(invalid_ids))
+                )
+            if explicit_recipients:
                 ok, message = await self.config.set_override(
                     store, group_id, "regex_push_admin", parts[1]
                 )

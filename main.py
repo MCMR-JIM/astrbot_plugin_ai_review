@@ -163,6 +163,7 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         by_group: dict[str, list[Any]] = {}
         for candidate in candidates:
             by_group.setdefault(candidate.group_id or "?", []).append(candidate)
+        skipped_admin_ids: set[str] = set()
         for group_id, group_candidates in by_group.items():
             config = self._get_config(group_id)
             target = str(config.get("regex_push_target", "group")).lower()
@@ -192,8 +193,17 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
                     )
                     continue
                 for admin_id in admin_ids:
+                    session = f"{platform_id}:FriendMessage:{admin_id}"
+                    if str(admin_id) not in self._astrbot_admin_ids(session):
+                        if str(admin_id) not in skipped_admin_ids:
+                            logger.warning(
+                                "[AI审核] 接收者 %s 不是 AstrBot 管理员，跳过私聊推送。",
+                                admin_id,
+                            )
+                            skipped_admin_ids.add(str(admin_id))
+                        continue
                     await self._push_candidates_to(
-                        f"{platform_id}:FriendMessage:{admin_id}",
+                        session,
                         group_candidates,
                         group_id,
                         config,
