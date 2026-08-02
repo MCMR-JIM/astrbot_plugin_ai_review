@@ -168,9 +168,6 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
             target = str(config.get("regex_push_target", "group")).lower()
             if target == "off":
                 continue
-            message = self.rules.build_push_message(group_candidates)
-            if message is None:
-                continue
             platform_id = next(
                 (
                     candidate.platform_id
@@ -195,13 +192,48 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
                     )
                     continue
                 for admin_id in admin_ids:
-                    await self._send_session(
-                        f"{platform_id}:FriendMessage:{admin_id}", message
+                    await self._push_candidates_to(
+                        f"{platform_id}:FriendMessage:{admin_id}",
+                        group_candidates,
+                        group_id,
+                        config,
                     )
             else:  # group
-                await self._send_session(
-                    f"{platform_id}:GroupMessage:{group_id}", message
+                await self._push_candidates_to(
+                    f"{platform_id}:GroupMessage:{group_id}",
+                    group_candidates,
+                    group_id,
+                    config,
                 )
+
+    async def _push_candidates_to(
+        self,
+        session: str,
+        candidates: list[Any],
+        group_id: str,
+        config: dict[str, Any],
+    ) -> None:
+        """向会话推送候选审批请求。
+
+        候选数达到 regex_forward_threshold 时打包为合并转发（节约显示空间），
+        转发失败自动降级为文本。
+        """
+        message = self.rules.build_push_message(candidates, group_id)
+        if message is None:
+            return
+        threshold = safe_int(config.get("regex_forward_threshold"), 3)
+        if threshold > 0 and len(candidates) >= threshold:
+            items = [
+                ("AI 审核", "0", self.rules.format_candidate_item(candidate))
+                for candidate in candidates
+            ]
+            err = await self.executor.send_forward(session, items)
+            if not err:
+                return
+            logger.warning(
+                "[AI审核] 合并转发推送失败，回退文本（%s）：%s", session, err
+            )
+        await self._send_session(session, message)
 
     async def _send_session(self, session: str, message: str) -> None:
         """向指定会话发送文本消息，失败仅记录日志。"""

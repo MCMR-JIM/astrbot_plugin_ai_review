@@ -42,6 +42,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "regex_candidate_ttl": 3,
     "regex_push_target": "group",
     "regex_push_admin": [],
+    "regex_forward_threshold": 3,
 }
 
 # 数值型配置的合法范围（闭区间）；不在表中的键不做范围校验。
@@ -63,6 +64,7 @@ _LIMITS: dict[str, tuple[float, float]] = {
     "regex_max_rules": (1, 10000),
     "regex_push_interval": (0, 10080),
     "regex_candidate_ttl": (1, 90),
+    "regex_forward_threshold": (0, 50),
 }
 # 支持按群覆盖的配置项。
 _OVERRIDE_KEYS = frozenset(

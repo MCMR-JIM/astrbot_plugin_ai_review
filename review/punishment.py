@@ -118,6 +118,44 @@ class PlatformExecutor:
         except Exception as exc:
             return f"发送消息失败: {exc!s}"
 
+    async def send_forward(
+        self,
+        session: str,
+        items: list[tuple[str, str, str]],
+    ) -> str:
+        """向指定会话发送合并转发消息（聊天记录式展开，节约显示空间）。
+
+        Args:
+            session: 统一消息来源字符串（unified_msg_origin）。
+            items: (昵称, QQ, 文本) 三元组列表，每个元素一条转发节点。
+
+        Returns:
+            空字符串表示成功，否则为错误描述（调用方回退文本发送）。
+        """
+        try:
+            from astrbot.api.event import MessageChain
+            from astrbot.api.message_components import Node, Nodes, Plain
+
+            nodes = [
+                Node(
+                    name=name or "AI 审核",
+                    uin=str(uin or "0"),
+                    content=[Plain(text)],
+                )
+                for name, uin, text in items
+                if text
+            ]
+            if not nodes:
+                return "转发内容为空。"
+            sent = await self._context.send_message(
+                session, MessageChain([Nodes(nodes=nodes)])
+            )
+            if sent is False:
+                return f"未找到会话对应的平台: {session}"
+            return ""
+        except Exception as exc:
+            return f"合并转发发送失败: {exc!s}"
+
     async def _call(self, platform_id: str, action: str, **params: Any) -> str:
         """调用平台 OneBot 动作。
 

@@ -43,6 +43,63 @@ from _plugin_under_test.utils.logger import (  # noqa: E402
 )
 from _plugin_under_test.utils.parser import parse_review_result  # noqa: E402
 
+# 轻量 fake astrbot 模块：让 commands/review.py、main.py 等可在无 AstrBot
+# 环境导入，从而运行纯逻辑/格式化测试；组件行为与真实 AstrBot 对齐。
+if "astrbot" not in sys.modules:
+    _fake_astrbot = types.ModuleType("astrbot")
+    _fake_astrbot.__path__ = []
+    _fake_api = types.ModuleType("astrbot.api")
+    _fake_api.__path__ = []
+
+    _filter = types.ModuleType("astrbot.api.event.filter")
+    _filter.EventMessageType = types.SimpleNamespace(GROUP_MESSAGE="group")
+    _filter.PermissionType = types.SimpleNamespace(ADMIN="admin")
+    _filter.event_message_type = lambda *a, **k: (lambda fn: fn)
+    _filter.command = lambda *a, **k: (lambda fn: fn)
+    _filter.permission_type = lambda *a, **k: (lambda fn: fn)
+
+    _fake_event = types.ModuleType("astrbot.api.event")
+    _fake_event.AstrMessageEvent = object
+    _fake_event.filter = _filter
+
+    class _FakeAt:
+        """模拟 AstrBot At 组件（AtAll 为其子类，qq="all" 表示全体）。"""
+
+        type = "at"
+
+        def __init__(self, qq: str = "", name: str = "", **_k) -> None:
+            self.qq = qq
+            self.name = name
+
+    class _FakeAtAll(_FakeAt):
+        def __init__(self, qq: str = "all", **kw) -> None:
+            super().__init__(qq=qq, **kw)
+
+    class _FakePlain:
+        type = "text"
+
+        def __init__(self, text: str = "", **_k) -> None:
+            self.text = text
+
+    _fake_components = types.ModuleType("astrbot.api.message_components")
+    _fake_components.At = _FakeAt
+    _fake_components.AtAll = _FakeAtAll
+    _fake_components.Plain = _FakePlain
+
+    _fake_star = types.ModuleType("astrbot.api.star")
+    _fake_star.Context = object
+    _fake_star.Star = object
+    _fake_star.register = lambda *a, **k: (lambda cls: cls)
+
+    sys.modules["astrbot"] = _fake_astrbot
+    sys.modules["astrbot.api"] = _fake_api
+    sys.modules["astrbot.api.event"] = _fake_event
+    sys.modules["astrbot.api.event.filter"] = _filter
+    sys.modules["astrbot.api.message_components"] = _fake_components
+    sys.modules["astrbot.api.star"] = _fake_star
+
+from _plugin_under_test.commands.review import ReviewCommandMixin  # noqa: E402
+
 
 class _FakeMessageObj:
     def __init__(self, timestamp: float | None = 1234567890.0) -> None:
@@ -1152,6 +1209,73 @@ class ReviewContextTest(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertIn("g1", captured[0])
         self.assertIn("审核日志", captured[0])
+
+
+class OutputFormatTest(unittest.TestCase):
+    """命令输出格式：紧凑内联审批命令、群号前缀、detail 概要。"""
+
+    @staticmethod
+    def _make_candidates() -> list:
+        from _plugin_under_test.models import RuleCandidate
+
+        return [
+            RuleCandidate(
+                candidate_id="cand0000001",
+                pattern="加我微信|广告",
+                note="广告引流",
+                level=2,
+                group_id="g1",
+            ),
+            RuleCandidate(
+                candidate_id="cand0000002",
+                pattern="你个傻",
+                note="辱骂",
+                level=2,
+                group_id="g1",
+            ),
+        ]
+
+    def test_candidate_item_has_approve_and_deny(self) -> None:
+        rules = RuleEngine(_FakeKV(), lambda gid="": _RULE_CFG)
+        candidate = self._make_candidates()[0]
+        text = rules.format_candidate_item(candidate)
+        self.assertIn("cand0000001", text)
+        self.assertIn("✅ 批准：/review rule approve cand0000001", text)
+        self.assertIn("❌ 拒绝：/review rule deny cand0000001", text)
+
+    def test_push_message_has_group_prefix(self) -> None:
+        rules = RuleEngine(_FakeKV(), lambda gid="": _RULE_CFG)
+        message = rules.build_push_message(self._make_candidates(), "123456789")
+        self.assertIn("[群 123456789]", message)
+        self.assertIn("待确认", message)
+
+    def test_candidates_inline_compact(self) -> None:
+        rules = RuleEngine(_FakeKV(), lambda gid="": _RULE_CFG)
+        rules._candidates = {
+            candidate.candidate_id: candidate
+            for candidate in self._make_candidates()
+        }
+        text = ReviewCommandMixin._format_candidates(rules)
+        self.assertIn("✅ /review rule approve cand0000001", text)
+        self.assertIn("❌ /review rule deny cand0000001", text)
+        self.assertIn("✅ /review rule approve cand0000002", text)
+
+    def test_detail_summary_has_approve_and_reject(self) -> None:
+        task = _make_task()
+        text = ReviewCommandMixin._format_detail_summary(task)
+        self.assertIn(f"✅ 同意：/review pass {task.task_id}", text)
+        self.assertIn(f"❌ 不同意：/review reject {task.task_id}", text)
+        self.assertIn("建议处罚", text)
+
+    def test_forward_threshold_config(self) -> None:
+        cfg = ConfigManager({})
+        ok, _ = asyncio.run(cfg.set_value("regex_forward_threshold", "51"))
+        self.assertFalse(ok)
+        ok, _ = asyncio.run(cfg.set_value("regex_forward_threshold", "5"))
+        self.assertTrue(ok)
+        self.assertEqual(cfg.get("regex_forward_threshold"), 5)
+        ok, _ = asyncio.run(cfg.set_value("regex_forward_threshold", "0"))
+        self.assertTrue(ok)  # 0 = 始终文本
 
 
 if __name__ == "__main__":

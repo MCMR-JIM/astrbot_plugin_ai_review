@@ -498,11 +498,26 @@ class RuleEngine:
         logger.info("[AI审核] 已清理 %d 条过期规则候选。", len(expired))
         return len(expired)
 
-    def build_push_message(self, candidates: list[RuleCandidate] | None = None) -> str | None:
+    @staticmethod
+    def format_candidate_item(candidate: RuleCandidate) -> str:
+        """格式化单条候选为审批文本（含批准/拒绝命令）。"""
+        return (
+            f"#{candidate.candidate_id} [{candidate.note or candidate.pattern}]"
+            f" L{candidate.level}（来源群 {candidate.group_id}）\n"
+            f"✅ 批准：/review rule approve {candidate.candidate_id}\n"
+            f"❌ 拒绝：/review rule deny {candidate.candidate_id}"
+        )
+
+    def build_push_message(
+        self,
+        candidates: list[RuleCandidate] | None = None,
+        group_id: str = "",
+    ) -> str | None:
         """构建沉淀推送消息（列出全部待审批候选）。
 
         Args:
             candidates: 候选列表；默认取全部。
+            group_id: 群号，非空时在首行标注来源群。
 
         Returns:
             推送文本；无候选时返回 None。
@@ -510,14 +525,15 @@ class RuleEngine:
         candidates = self.candidates() if candidates is None else candidates
         if not candidates:
             return None
+        prefix = f"📬 [群 {group_id}] AI 审核沉淀请求" if group_id else "📬 AI 审核沉淀请求"
         lines = [
-            f"📬 AI 审核沉淀请求：{len(candidates)} 条规则候选待确认",
+            f"{prefix}：{len(candidates)} 条规则候选待确认",
             "（批准后进入观察期，命中仍走 AI 对比验证，不直接处罚）",
         ]
         for candidate in candidates[:10]:
             lines.append(
                 f"#{candidate.candidate_id} [{candidate.note or candidate.pattern[:20]}]"
-                f" L{candidate.level}（来源群 {candidate.group_id}）"
+                f" L{candidate.level}"
             )
         if len(candidates) > 10:
             lines.append(f"…共 {len(candidates)} 条")
