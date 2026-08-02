@@ -40,6 +40,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "regex_max_rules": 200,
     "regex_push_interval": 30,
     "regex_candidate_ttl": 3,
+    "regex_approval_permission": "astrbot_admin",
     "regex_push_target": "group",
     "regex_push_admin": [],
     "regex_forward_threshold": 3,
@@ -82,6 +83,7 @@ _OVERRIDE_KEYS = frozenset(
         "llm_provider_id",
         "enable_regex_prefilter",
         "regex_sediment",
+        "regex_approval_permission",
         "regex_push_target",
         "regex_push_admin",
     }
@@ -194,6 +196,13 @@ class ConfigManager:
             "off",
         ):
             return False, "regex_push_target 只能是 group / admin / off 之一。"
+        if key == "regex_approval_permission" and str(value).lower() not in (
+            "astrbot_admin",
+            "group_admin",
+        ):
+            return False, (
+                "regex_approval_permission 只能是 astrbot_admin / group_admin 之一。"
+            )
         limits = _LIMITS.get(key)
         if limits is not None and not (limits[0] <= value <= limits[1]):
             return False, f"配置项 {key} 的值需在 {limits[0]} ~ {limits[1]} 之间。"
@@ -248,6 +257,13 @@ class ConfigManager:
             "off",
         ):
             return False, "regex_push_target 只能是 group / admin / off 之一。"
+        if key == "regex_approval_permission" and str(value).lower() not in (
+            "astrbot_admin",
+            "group_admin",
+        ):
+            return False, (
+                "regex_approval_permission 只能是 astrbot_admin / group_admin 之一。"
+            )
         limits = _LIMITS.get(key)
         if limits is not None and not (limits[0] <= value <= limits[1]):
             return False, f"配置项 {key} 的值需在 {limits[0]} ~ {limits[1]} 之间。"

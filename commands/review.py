@@ -96,6 +96,59 @@ class ReviewCommandMixin:
             else:
                 yield event.plain_result(self._usage())
 
+    @staticmethod
+    def _rule_command_parts(event: AstrMessageEvent, sub: str) -> tuple[str, ...]:
+        """Parse rule arguments from full or AstrBot prefix-stripped commands."""
+        raw = (getattr(event, "message_str", "") or "").strip()
+        tokens = raw.split()
+        if tokens and tokens[0].lower() in ("review", "/review"):
+            if len(tokens) >= 2 and tokens[1].lower() == "rule":
+                return tuple(tokens[2:])
+            return ()
+        return tuple((sub or "").split())
+
+    async def _can_manage_rule_candidate(
+        self,
+        event: AstrMessageEvent,
+        parts: tuple[str, ...],
+    ) -> bool:
+        """Authorize a non-AstrBot administrator for one candidate decision."""
+        if len(parts) != 2 or parts[0].lower() not in ("approve", "deny"):
+            return False
+        rules = getattr(self, "rules", None)
+        if rules is None:
+            return False
+        try:
+            candidate = next(
+                (
+                    item
+                    for item in rules.candidates()
+                    if str(getattr(item, "candidate_id", "")) == parts[1]
+                ),
+                None,
+            )
+            if candidate is None:
+                return False
+            platform_id = str(getattr(candidate, "platform_id", "")).strip()
+            group_id = str(getattr(candidate, "group_id", "")).strip()
+            if not platform_id or not group_id:
+                return False
+            permission = str(
+                self._get_config(group_id).get(
+                    "regex_approval_permission", "astrbot_admin"
+                )
+            ).lower()
+            if permission != "group_admin":
+                return False
+            allowed, _error = await self.executor.is_group_moderator(
+                platform_id,
+                group_id,
+                event.get_sender_id(),
+            )
+            return allowed
+        except Exception:
+            return False
+
     # ---------- 主动审核 ----------
 
     async def _review_uid(self, event: AstrMessageEvent, uid: str) -> str:
@@ -289,13 +342,10 @@ class ReviewCommandMixin:
         rules = getattr(self, "rules", None)
         if rules is None:
             return "❌ 正则规则引擎未启用。"
-        raw = (getattr(event, "message_str", "") or "").strip()
-        prefix = "/review rule"
-        pos = raw.find(prefix)
-        rest = raw[pos + len(prefix):].strip() if pos != -1 else sub
-        parts = rest.split()
+        parts = list(self._rule_command_parts(event, sub))
         if not parts:
             return self._rule_usage()
+        rest = " ".join(parts)
         command = parts[0].lower()
         if command == "list":
             return self._format_rules(rules)
@@ -421,19 +471,37 @@ class ReviewCommandMixin:
             if not recipient_ids:
                 return "❌ 未配置私聊推送接收管理员。"
             platform_id = event.get_platform_id()
-            invalid_ids = {
-                recipient_id
-                for recipient_id in recipient_ids
-                if recipient_id
-                not in self._astrbot_admin_ids(
-                    f"{platform_id}:FriendMessage:{recipient_id}"
+            permission = str(
+                self.config.effective(group_id).get(
+                    "regex_approval_permission", "astrbot_admin"
                 )
-            }
+            ).lower()
+            if permission == "group_admin":
+                invalid_ids = set()
+                for recipient_id in recipient_ids:
+                    try:
+                        allowed, _error = await self.executor.is_group_moderator(
+                            platform_id,
+                            group_id,
+                            recipient_id,
+                        )
+                    except Exception:
+                        allowed = False
+                    if not allowed:
+                        invalid_ids.add(recipient_id)
+                invalid_message = "❌ 以下接收者不是群主或群管理员："
+            else:
+                invalid_ids = {
+                    recipient_id
+                    for recipient_id in recipient_ids
+                    if recipient_id
+                    not in self._astrbot_admin_ids(
+                        f"{platform_id}:FriendMessage:{recipient_id}"
+                    )
+                }
+                invalid_message = "❌ 以下接收者不是 AstrBot 管理员："
             if invalid_ids:
-                return (
-                    "❌ 以下接收者不是 AstrBot 管理员："
-                    + ", ".join(sorted(invalid_ids))
-                )
+                return invalid_message + ", ".join(sorted(invalid_ids))
             if explicit_recipients:
                 ok, message = await self.config.set_override(
                     store, group_id, "regex_push_admin", parts[1]

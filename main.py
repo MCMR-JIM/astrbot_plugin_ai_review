@@ -100,7 +100,6 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
             await asyncio.gather(*tasks, return_exceptions=True)
 
     @filter.command("review")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_review(
         self,
         event: AstrMessageEvent,
@@ -112,6 +111,20 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
         AstrBot 按 handler 的 __module__ 与插件主模块路径匹配来绑定插件实例，
         因此指令入口必须定义在本文件（main.py），mixin 中的逻辑经此委托。
         """
+        try:
+            allowed = bool(event.is_admin())
+        except Exception:
+            allowed = False
+        if not allowed:
+            parts = (
+                self._rule_command_parts(event, sub)
+                if (target or "").strip().lower() == "rule"
+                else ()
+            )
+            allowed = await self._can_manage_rule_candidate(event, parts)
+        if not allowed:
+            yield event.plain_result("❌ 权限不足。")
+            return
         async for result in self._cmd_review(event, target, sub):
             yield result
 
@@ -192,13 +205,27 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
                         group_id,
                     )
                     continue
+                permission = str(
+                    config.get("regex_approval_permission", "astrbot_admin")
+                ).lower()
                 for configured_admin_id in admin_ids:
                     admin_id = str(configured_admin_id).strip()
                     session = f"{platform_id}:FriendMessage:{admin_id}"
-                    if admin_id not in self._astrbot_admin_ids(session):
+                    if permission == "group_admin":
+                        try:
+                            allowed, _error = await self.executor.is_group_moderator(
+                                platform_id,
+                                group_id,
+                                admin_id,
+                            )
+                        except Exception:
+                            allowed = False
+                    else:
+                        allowed = admin_id in self._astrbot_admin_ids(session)
+                    if not allowed:
                         if admin_id not in skipped_admin_ids:
                             logger.warning(
-                                "[AI审核] 接收者 %s 不是 AstrBot 管理员，跳过私聊推送。",
+                                "[AI审核] 接收者 %s 不具备当前审批权限，跳过私聊推送。",
                                 admin_id,
                             )
                             skipped_admin_ids.add(admin_id)

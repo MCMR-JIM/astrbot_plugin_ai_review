@@ -37,6 +37,45 @@ class _Context:
         return self.result
 
 
+class _Bot:
+    def __init__(self, result: object = None, error: Exception | None = None) -> None:
+        self.result = result
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def call_action(self, **params):
+        self.calls.append(params)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class _Adapter:
+    def __init__(
+        self, bot: object = None, error: Exception | None = None
+    ) -> None:
+        self.bot = bot
+        self.error = error
+
+    def get_client(self):
+        if self.error is not None:
+            raise self.error
+        return self.bot
+
+
+class _RoleContext:
+    def __init__(
+        self, adapter: object = None, error: Exception | None = None
+    ) -> None:
+        self.adapter = adapter
+        self.error = error
+
+    def get_platform_inst(self, platform_id: str):
+        if self.error is not None:
+            raise self.error
+        return self.adapter if platform_id == "platform" else None
+
+
 @unittest.skipUnless(_ASTRBOT_AVAILABLE, "AstrBot is required for message components")
 class PlatformExecutorSendMessageTest(unittest.TestCase):
     def test_reports_explicit_false_result(self) -> None:
@@ -66,6 +105,58 @@ class PlatformExecutorSendMessageTest(unittest.TestCase):
             )
         )
         self.assertEqual(error, "发送消息失败: boom")
+
+
+class PlatformExecutorGroupModeratorTest(unittest.TestCase):
+    def test_accepts_owner_and_admin_roles(self) -> None:
+        for role in ("owner", "admin"):
+            with self.subTest(role=role):
+                bot = _Bot({"role": role})
+                result = asyncio.run(
+                    PlatformExecutor(_RoleContext(_Adapter(bot))).is_group_moderator(
+                        "platform", "30003", "10001"
+                    )
+                )
+                self.assertEqual(result, (True, ""))
+                self.assertEqual(
+                    bot.calls,
+                    [
+                        {
+                            "action": "get_group_member_info",
+                            "group_id": "30003",
+                            "user_id": "10001",
+                        }
+                    ],
+                )
+
+    def test_rejects_member_and_malformed_results(self) -> None:
+        for result in ({"role": "member"}, None, {}, "owner"):
+            with self.subTest(result=result):
+                allowed, error = asyncio.run(
+                    PlatformExecutor(
+                        _RoleContext(_Adapter(_Bot(result)))
+                    ).is_group_moderator("platform", "30003", "10001")
+                )
+                self.assertFalse(allowed)
+                self.assertTrue(error)
+
+    def test_contains_missing_platform_client_and_onebot_errors(self) -> None:
+        contexts = (
+            _RoleContext(),
+            _RoleContext(_Adapter()),
+            _RoleContext(error=RuntimeError("platform failed")),
+            _RoleContext(_Adapter(error=RuntimeError("client failed"))),
+            _RoleContext(_Adapter(_Bot(error=RuntimeError("boom")))),
+        )
+        for context in contexts:
+            with self.subTest(context=context):
+                allowed, error = asyncio.run(
+                    PlatformExecutor(context).is_group_moderator(
+                        "platform", "30003", "10001"
+                    )
+                )
+                self.assertFalse(allowed)
+                self.assertTrue(error)
 
 
 if __name__ == "__main__":

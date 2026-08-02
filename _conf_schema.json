@@ -195,6 +195,13 @@
     "hint": "超过该天数未审批的候选自动丢弃",
     "default": 3
   },
+  "regex_approval_permission": {
+    "type": "string",
+    "description": "规则候选审批权限",
+    "hint": "astrbot_admin=仅 AstrBot 管理员；group_admin=同时允许候选来源群的群主和群管理员审批",
+    "default": "astrbot_admin",
+    "options": ["astrbot_admin", "group_admin"]
+  },
   "regex_push_target": {
     "type": "string",
     "description": "沉淀推送目标",
