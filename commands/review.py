@@ -19,6 +19,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from astrbot.api.event import AstrMessageEvent
+from astrbot.api.message_components import At
 
 from ..models import ReviewLog
 from ..utils.logger import get_logger, log_event, log_review, review_context
@@ -485,8 +486,10 @@ class ReviewCommandMixin:
         if message_obj is None:
             return ""
         for comp in getattr(message_obj, "message", []):
-            if getattr(comp, "type", "") == "at":
+            if isinstance(comp, At) or getattr(comp, "type", "") == "at":
                 qq = getattr(comp, "qq", None)
+                if qq == "all":
+                    continue
                 if qq:
                     return str(qq)
         return ""
