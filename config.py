@@ -144,11 +144,6 @@ class ConfigManager:
             merged.update(overrides)
         return merged
 
-    @property
-    def raw(self) -> dict:
-        """底层配置字典（可被 get_config 回调直接使用）。"""
-        return self._config
-
     def get(self, key: str, default: Any = None) -> Any:
         """读取单个配置项。
 

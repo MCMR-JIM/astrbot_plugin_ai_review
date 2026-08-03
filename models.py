@@ -43,14 +43,6 @@ class PunishmentType(str, Enum):
     BLACKLIST = "blacklist"
 
 
-class ReviewMode(str, Enum):
-    """审核触发模式。"""
-
-    ACTIVE = "active"
-    PASSIVE = "passive"
-    BOTH = "both"
-
-
 class RuleStatus(str, Enum):
     """正则规则状态。
 
@@ -376,7 +368,6 @@ class ReviewLog:
     review_status: str = ""
     admin_id: str = ""
     punishment: str = ""
-    blacklist_sync: str = ""
     task_id: str = ""
     llm_provider: str = ""
 

@@ -7,7 +7,6 @@ LLM 调用、结果解析（含重试）、阈值判断、审核任务入队、�
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
@@ -48,6 +47,7 @@ class ReviewWorkflow:
         stats: StatsStore | None = None,
         store: KVStore | None = None,
         rules: Any | None = None,
+        executor: Any | None = None,
     ) -> None:
         """初始化工作流。
 
@@ -69,7 +69,7 @@ class ReviewWorkflow:
         self._stats = stats
         self._rules = rules
         self._cooldown = CooldownManager(get_config, store)
-        self.filters = MessageFilters(get_config, self._cooldown)
+        self.filters = MessageFilters(get_config, self._cooldown, executor)
 
     async def load_state(self) -> None:
         """从 KV 恢复冷却表。"""
@@ -101,7 +101,7 @@ class ReviewWorkflow:
             return
         if self.filters.review_mode(group_id) not in ("passive", "both"):
             return
-        skip, reason = self.filters.should_skip(event)
+        skip, reason = await self.filters.should_skip(event)
         if skip:
             logger.debug(
                 "[AI审核] 消息被过滤：%s (群=%s 用户=%s)",
@@ -149,11 +149,12 @@ class ReviewWorkflow:
             provider=self.llm.last_provider_id,
         ):
             log_event("manual_review", target=target_user_id or "(整体)")
-            return await self._run_review(
+            task, _outcome = await self._run_review(
                 event,
                 target_user_id=target_user_id,
                 target_nickname=target_nickname,
             )
+            return task
 
     async def review_recent(self, event: "AstrMessageEvent") -> ReviewTask | None:
         """主动审核最近聊天记录整体（/review recent）。
@@ -169,7 +170,10 @@ class ReviewWorkflow:
             provider=self.llm.last_provider_id,
         ):
             log_event("manual_review", target="(整体)")
-            return await self._run_review(event, target_user_id="", target_nickname="")
+            task, _outcome = await self._run_review(
+                event, target_user_id="", target_nickname=""
+            )
+            return task
 
     # ---------- 规则层 ----------
 
@@ -204,14 +208,17 @@ class ReviewWorkflow:
                 await self._rules.record_hit(hits[0].rule_id)
             return True
         observing = self._rules.match_observing(record.content)
-        task = await self._run_review(
+        task, outcome = await self._run_review(
             event,
             target_user_id=record.user_id,
             target_nickname=record.nickname,
             current_record=record,
         )
-        for rule in observing:
-            await self._rules.record_observation(rule.rule_id, task is not None)
+        if observing and outcome in ("task_created", "no_violation"):
+            for rule in observing:
+                await self._rules.record_observation(
+                    rule.rule_id, outcome == "task_created"
+                )
         return True
 
     # ---------- 内部实现 ----------
@@ -222,7 +229,7 @@ class ReviewWorkflow:
         target_user_id: str,
         target_nickname: str,
         current_record: ChatRecord | None = None,
-    ) -> ReviewTask | None:
+    ) -> tuple[ReviewTask | None, str]:
         """执行一次完整 LLM 审核。
 
         Args:
@@ -231,11 +238,13 @@ class ReviewWorkflow:
             target_nickname: 目标用户昵称。
 
         Returns:
-            审核任务；无结果时返回 None。
+            (审核任务, 结果分类)。分类用于观察期规则统计区分真实判定
+            与故障路径（W4）：skipped / llm_failed / parse_failed /
+            no_violation / task_created / queue_rejected。
         """
         group_id = event.get_group_id()
         if not group_id:
-            return None
+            return None, "skipped"
         config = self._get_config(group_id)
         threshold = safe_int(config.get("risk_threshold"), 80)
 
@@ -243,7 +252,10 @@ class ReviewWorkflow:
             skip, reason = self.filters.should_skip_target(event, target_user_id)
             if skip:
                 logger.debug("[AI审核] 主动审核被过滤：%s", reason)
-                return None
+                return None, "skipped"
+            # 审核开始即记录冷却起点（LLM 调用前），避免调用窗口内
+            # 新消息绕过冷却检查导致并发触发多次模型调用（W1）
+            await self._cooldown.touch(group_id, target_user_id)
         records = self.history.get_recent(
             group_id,
             safe_int(config.get("history_count"), 50),
@@ -253,7 +265,7 @@ class ReviewWorkflow:
                 records = [current_record]
             else:
                 logger.info("[AI审核] 群=%s 暂无聊天记录，本次审核跳过。", group_id)
-                return None
+                return None, "skipped"
         records = trim_records(
             records,
             safe_int(config.get("max_chat_chars"), 3000),
@@ -275,11 +287,11 @@ class ReviewWorkflow:
         text = await self.llm.chat(system, user, output, umo)
         if text is None:
             log_event("llm_call_failed", group_id=group_id)
-            return None
+            return None, "llm_failed"
         result = await parse_with_llm_retry(self.llm, system, user, output, umo, text)
         if result is None:
             log_event("parse_failed", group_id=group_id)
-            return None
+            return None, "parse_failed"
 
         if not result.illegal or result.risk < threshold:
             logger.info(
@@ -290,9 +302,9 @@ class ReviewWorkflow:
                 threshold,
             )
             log_event("review_clean", group_id=group_id, risk=result.risk)
-            return None
+            return None, "no_violation"
 
-        return await self._enqueue_task(
+        task = await self._enqueue_task(
             event,
             records,
             target_user_id,
@@ -302,6 +314,9 @@ class ReviewWorkflow:
             config,
             llm_provider=self.llm.last_provider_id,
         )
+        if task is None:
+            return None, "queue_rejected"
+        return task, "task_created"
 
     async def _enqueue_task(
         self,
@@ -340,6 +355,10 @@ class ReviewWorkflow:
             )
             return None
         if target_user_id:
+            # 注意：此处为冷却"二次写入"（R1）。LLM 路径的冷却已在
+            # _run_review 开头记录；此处不可删除——规则命中路径
+            # （_try_rule_prefilter 命中分支）不经过 _run_review，
+            # 仅靠此处的 touch 设置冷却。
             await self._cooldown.touch(group_id, target_user_id)
         if self._stats is not None:
             await self._stats.record_violation(group_id, target_user_id, result.type)

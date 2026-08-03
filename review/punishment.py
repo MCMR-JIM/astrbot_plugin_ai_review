@@ -230,44 +230,42 @@ class Punisher:
         """
         self._executor = executor
         self._get_config = get_config
-        self._blacklist_enabled = False
-        self._mute_duration = 600
+        # 固定阶段实例；mute 阶段每次按群禁言时长构造（_stage_for）
         self._stages: dict[str, PunishmentStrategy] = {
             PunishmentType.WARN.value: WarnStrategy(executor),
-            PunishmentType.MUTE.value: MuteStrategy(executor, 600),
             PunishmentType.KICK.value: KickStrategy(executor),
             PunishmentType.BAN.value: BanStrategy(executor),
             PunishmentType.BLACKLIST.value: BlacklistStrategy(blacklist_adapter),
         }
-        self._pipelines: dict[str, list[str]] = dict(DEFAULT_PIPELINES)
-        self._sync_config()
 
-    def _sync_config(self, group_id: str = "") -> None:
-        """同步处罚相关配置（支持热加载与按群覆盖）。"""
+    def _config_for(self, group_id: str = "") -> tuple[bool, int, dict[str, list[str]]]:
+        """读取按群生效的处罚配置（局部值）。
+
+        返回 (enable_blacklist, mute_duration, pipelines)。不写实例状态，
+        多群交错执行时互不覆盖（W2）。
+        """
         if self._get_config is None:
-            return
+            return False, 600, dict(DEFAULT_PIPELINES)
         config = self._get_config(group_id)
-        self._blacklist_enabled = bool(config.get("enable_blacklist", False))
+        blacklist_enabled = bool(config.get("enable_blacklist", False))
         mute_duration = safe_int(config.get("mute_duration"), 600)
-        if mute_duration != self._mute_duration:
-            self._mute_duration = mute_duration
-            self._stages[PunishmentType.MUTE.value] = MuteStrategy(
-                self._executor,
-                mute_duration,
-            )
+        pipelines: dict[str, list[str]] = dict(DEFAULT_PIPELINES)
         raw_pipeline = config.get("punish_pipeline") or {}
         if isinstance(raw_pipeline, dict):
-            override = {
-                str(key): [str(item) for item in value]
-                for key, value in raw_pipeline.items()
-                if isinstance(value, list)
-            }
-            self._pipelines = {**DEFAULT_PIPELINES, **override}
+            pipelines.update(
+                {
+                    str(key): [str(item) for item in value]
+                    for key, value in raw_pipeline.items()
+                    if isinstance(value, list)
+                }
+            )
+        return blacklist_enabled, mute_duration, pipelines
 
-    @property
-    def pipelines(self) -> dict[str, list[str]]:
-        """当前处罚流水线映射（副本）。"""
-        return {key: list(value) for key, value in self._pipelines.items()}
+    def _stage_for(self, name: str, mute_duration: int) -> PunishmentStrategy | None:
+        """获取阶段实例；mute 阶段按当前群的禁言时长构造。"""
+        if name == PunishmentType.MUTE.value:
+            return MuteStrategy(self._executor, mute_duration)
+        return self._stages.get(name)
 
     async def execute(self, task: ReviewTask, admin_id: str) -> str:
         """按任务建议的处罚类型执行整条流水线。
@@ -279,16 +277,16 @@ class Punisher:
         Returns:
             各阶段执行结果汇总。
         """
-        self._sync_config(task.group_id)
-        stage_names = self._pipelines.get(task.result.suggestion) or [
+        blacklist_enabled, mute_duration, pipelines = self._config_for(task.group_id)
+        stage_names = pipelines.get(task.result.suggestion) or [
             task.result.suggestion
         ]
         lines = []
         for name in stage_names:
-            if name == PunishmentType.BLACKLIST.value and not self._blacklist_enabled:
+            if name == PunishmentType.BLACKLIST.value and not blacklist_enabled:
                 lines.append("黑库同步未启用（enable_blacklist=false），跳过。")
                 continue
-            stage = self._stages.get(name)
+            stage = self._stage_for(name, mute_duration)
             if stage is None:
                 lines.append(f"[{name}] 未知处罚阶段，已跳过。")
                 continue

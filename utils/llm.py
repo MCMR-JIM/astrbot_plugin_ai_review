@@ -62,11 +62,6 @@ class LLMClient:
         self._last_provider_id = ""
 
     @property
-    def max_concurrency(self) -> int:
-        """当前并发上限。"""
-        return self._max_concurrency
-
-    @property
     def last_provider_id(self) -> str:
         """最近一次实际完成调用的 Provider ID（未调用或失败为空）。"""
         return self._last_provider_id

@@ -17,8 +17,9 @@ from .persistence import KVStore
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
 
-_FILTER_ROLES = ("admin", "owner")
 _MAX_COOLDOWN_ENTRIES = 1024
+# 群管列表缓存时长（秒）：避免每条消息都调用 OneBot get_group_member_info
+_GROUP_ADMIN_CACHE_TTL = 300
 
 
 class CooldownManager:
@@ -101,21 +102,54 @@ class MessageFilters:
         self,
         get_config: Callable[[str], dict[str, Any]],
         cooldown: CooldownManager,
+        executor: Any = None,
     ) -> None:
         """初始化过滤器。
 
         Args:
             get_config: 返回当前配置字典的回调，可接受群号参数。
             cooldown: 冷却管理器实例。
+            executor: 平台能力执行器（可选），用于群主/群管免审判定。
         """
         self._get_config = get_config
         self._cooldown = cooldown
+        self._executor = executor
+        self._group_admin_cache: dict[tuple[str, str], tuple[float, bool]] = {}
 
     def review_mode(self, group_id: str = "") -> str:
         """当前触发模式（支持按群覆盖）。"""
         return str(self._get_config(group_id).get("review_mode", "both"))
 
-    def should_skip(self, event: "AstrMessageEvent") -> tuple[bool, str]:
+    async def _is_group_moderator(
+        self,
+        event: "AstrMessageEvent",
+        user_id: str,
+    ) -> bool:
+        """判断用户是否为当前群群主/群管（按 群+用户 维度缓存判定结果）。
+
+        缓存键为 (group_id, user_id)：避免群管 A 首查后窗口内群管 B
+        被 `B in {A}` 误判且不再查询（F1）。查询失败返回 False
+        （不豁免，继续审核，宁审勿漏）。
+        """
+        if self._executor is None:
+            return False
+        group_id = event.get_group_id()
+        cache_key = (group_id, user_id)
+        cached = self._group_admin_cache.get(cache_key)
+        if cached and time.time() - cached[0] < _GROUP_ADMIN_CACHE_TTL:
+            return cached[1]
+        try:
+            allowed, _error = await self._executor.is_group_moderator(
+                event.get_platform_id(),
+                group_id,
+                user_id,
+            )
+            self._group_admin_cache[cache_key] = (time.time(), bool(allowed))
+            return bool(allowed)
+        except Exception:
+            return False
+
+    async def should_skip(self, event: "AstrMessageEvent") -> tuple[bool, str]:
         """被动审核前置过滤。
 
         Returns:
@@ -125,9 +159,12 @@ class MessageFilters:
         content = event.get_message_outline()
         if not sender_id or sender_id == event.get_self_id():
             return True, "机器人消息"
-        role = str(getattr(event, "role", "member"))
-        if role in _FILTER_ROLES or event.is_admin():
-            return True, "管理员/群主"
+        # event.role 恒为 "member"/AstrBot 管理员标记，无群主语义；豁免判定：
+        # AstrBot 管理员 + OneBot 群主/群管（W3）
+        if event.is_admin():
+            return True, "管理员"
+        if await self._is_group_moderator(event, sender_id):
+            return True, "群主/群管"
         config = self._get_config(event.get_group_id())
         if sender_id in [str(u) for u in config.get("whitelist", [])]:
             return True, "白名单用户"

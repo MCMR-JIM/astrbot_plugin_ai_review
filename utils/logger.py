@@ -167,7 +167,7 @@ def log_review(entry: "ReviewLog") -> None:
         time.localtime(entry.timestamp),
     )
     logger.info(
-        "[审核] 时间=%s 群=%s 用户=%s 任务=%s 模型=%s 内容=%r 风险=%d 结果=%s 管理员=%s 处罚=%s 黑库=%s",
+        "[审核] 时间=%s 群=%s 用户=%s 任务=%s 模型=%s 内容=%r 风险=%d 结果=%s 管理员=%s 处罚=%s",
         time_str,
         entry.group_id,
         entry.user_id,
@@ -178,7 +178,6 @@ def log_review(entry: "ReviewLog") -> None:
         entry.review_status,
         entry.admin_id,
         entry.punishment,
-        entry.blacklist_sync,
     )
 
 
