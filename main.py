@@ -35,7 +35,7 @@ logger = get_logger()
 _PLUGIN_NAME = "astrbot_plugin_ai_review"
 _PLUGIN_AUTHOR = "Ni-ShuWu&kelai141"
 _PLUGIN_DESC = "基于 AstrBot 大模型的群聊 AI 审核助手，生成审核建议供管理员确认后执行处罚。"
-_PLUGIN_VERSION = "1.21"
+_PLUGIN_VERSION = "1.22"
 
 _PUSH_CHECK_INTERVAL = 60  # 推送循环检查间隔（秒）
 
@@ -77,6 +77,7 @@ class AiReviewPlugin(ReviewCommandMixin, ConfigCommandMixin, Star):
             store=self._kv,
             rules=self.rules,
             executor=self.executor,
+            blacklist=self.adapter,
         )
         self.punisher = Punisher(self.executor, self.adapter, get_config)
         self._last_push_ts = 0.0

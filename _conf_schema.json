@@ -42,6 +42,12 @@
     "hint": "通过处罚时是否同步皮梦云黑库",
     "default": false
   },
+  "enable_blacklist_check": {
+    "type": "bool",
+    "description": "审核前查询黑库",
+    "hint": "AI 审核前通过皮梦云插件查询目标用户是否已在黑库，命中则加重风险判定并在 Prompt 中注明",
+    "default": false
+  },
   "enable_history": {
     "type": "bool",
     "description": "启用聊天记录缓存",

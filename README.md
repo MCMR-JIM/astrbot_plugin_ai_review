@@ -22,7 +22,7 @@ AI 自动分析群成员聊天记录，为管理员生成审核建议（风险�
 - **正则规则引擎**：将反复出现的违规模式提炼为规则候选（`data/prompts/rule.txt`），定期推送审批请求（目标可配置：来源群聊天 / 指定管理员私聊 / 关闭，`/reviewconfig group <群号> regex_push_target group|admin|off`），（`regex_approval_permission=group_admin` 时本群群主/群管可审批）`/review rule approve|deny` 确认后才进入观察期；观察期命中仍走 AI 对比验证，准确率达标自动激活，不足自动熔断停用，大幅节省 token
 - **按群配置覆盖**：不同群可独立设置阈值、开关与处罚参数（`/reviewconfig group`）
 - **处罚策略**：warn / mute / kick / ban / blacklist，流水线模式，可配置扩展
-- **皮梦云黑库同步**：通过皮梦云黑库插件同步，未安装时自动跳过（弱依赖）
+- **皮梦云黑库双向通信**：AI 审核 → 皮梦云同步拉黑；皮梦云 → AI 审核查询黑名单加重判定（两插件实例互调，未安装自动跳过）
 - **全异步**：被动审核以后台任务执行，任务异常有日志可查
 - **配置热加载**：配置修改后即时生效（含处罚配置）
 - **LLM 调用加固**：网络失败自动退避重试，采样温度可配置（默认 0.3 保证一致性）
@@ -128,10 +128,12 @@ PENDING（待处理，命中违规后入队）
 阶段取值为 `warn` / `mute` / `kick` / `ban` / `blacklist`，可按需组合扩展。
 未知阶段会跳过并在结果中提示；`blacklist` 阶段还会额外受 `enable_blacklist` 开关控制。
 
-### 皮梦云黑库同步
+### 皮梦云黑库（两插件互相通信）
 
-当 `enable_blacklist=true` 且检测到 `astrbot_plugin_pimeng_blacklist` 插件已加载时，
-`/review pass` 执行 `blacklist` 处罚会自动调用其 `api.add_to_blacklist` 接口同步黑库。
+当检测到 `astrbot_plugin_pimeng_blacklist` 插件已加载时，两插件通过 AstrBot 插件实例互调：
+
+- **AI 审核 → 皮梦云（同步拉黑）**：`enable_blacklist=true` 时，`/review pass` 执行 `blacklist` 处罚会自动调用其 `api.add_to_blacklist` 接口同步黑库。
+- **皮梦云 → AI 审核（查询黑名单）**：`enable_blacklist_check=true` 时，AI 审核前经皮梦云插件查询目标用户是否已在黑库（本地缓存优先，回退云端实时查询）；命中则在 Prompt 中注明该用户已在云黑库，并**从严处理**（LLM 判定不违规时强制视为违规入队）。
 
 - 插件未安装 / 未启用 / 未配置 Bot Token 时自动跳过，不影响插件运行；
 - 建议处罚到黑库等级的映射：warn→1、mute→2、kick/ban/blacklist→3。
@@ -245,7 +247,8 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 | `risk_threshold` | int | 80 | AI 风险值低于该值视为不违规 |
 | `review_timeout` | int | 300 | 审核任务超时（秒），超时自动失效 |
 | `cooldown` | int | 300 | 同一用户两次自动审核最小间隔（秒） |
-| `enable_blacklist` | bool | false | 是否启用皮梦云黑库同步 |
+| `enable_blacklist` | bool | false | 是否启用皮梦云黑库同步（通过处罚同步拉黑） |
+| `enable_blacklist_check` | bool | false | 审核前查询皮梦云黑库，命中加重判定（从严处理） |
 | `enable_history` | bool | true | 是否启用聊天记录缓存（关闭后主动审核 `uid` 无历史可用） |
 | `prompt_path` | string | 空 | 自定义 Prompt 目录，留空使用内置 `data/prompts` |
 | `whitelist` | list | [] | 白名单用户 ID，不参与自动审核 |

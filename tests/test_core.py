@@ -27,6 +27,7 @@ sys.modules[_PKG] = _pkg
 sys.path.insert(0, str(_REPO_ROOT))
 
 from _plugin_under_test.config import ConfigManager  # noqa: E402
+from _plugin_under_test.adapters.pimeng import PimengBlacklistAdapter  # noqa: E402
 from _plugin_under_test.models import ChatRecord, ReviewResult, ReviewTask  # noqa: E402
 from _plugin_under_test.prompt import PromptManager  # noqa: E402
 from _plugin_under_test.review.persistence import KVStore  # noqa: E402
@@ -570,6 +571,184 @@ class SecondReviewWorkflowTest(unittest.TestCase):
         self.assertEqual(llm.calls, 2)
         self.assertEqual(len(tasks), 1)
         self.assertEqual(llm.called_providers, ["", ""])
+
+
+class _StubBlacklist:
+    """模拟皮梦云黑库适配器。"""
+
+    def __init__(self, hit: dict | None = None, available: bool = True) -> None:
+        self._hit = hit
+        self._available = available
+        self.checked: list[str] = []
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    async def check_user(self, user_id: str) -> dict | None:
+        self.checked.append(user_id)
+        return self._hit
+
+
+class BlacklistCheckWorkflowTest(unittest.TestCase):
+    """皮梦云 → AI 审核：审核前查询黑库并加重判定。"""
+
+    @staticmethod
+    def _make_cfg(check: bool) -> dict:
+        cfg = PassiveReviewWorkflowTest._make_cfg(True)
+        cfg["enable_blacklist_check"] = check
+        return cfg
+
+    @classmethod
+    def _make_workflow(cls, cfg: dict, llm: _StubLLM, blacklist: _StubBlacklist):
+        history = HistoryCache(lambda gid="": cfg)
+        prompt = PromptManager(
+            str(Path(__file__).resolve().parent.parent),
+            lambda gid="": cfg,
+        )
+        queue = ReviewQueue()
+        workflow = ReviewWorkflow(
+            history,
+            prompt,
+            llm,
+            queue,
+            lambda gid="": cfg,
+            blacklist=blacklist,
+        )
+        return workflow, history, queue
+
+    def test_disabled_does_not_query(self) -> None:
+        llm = _StubLLM()
+        blacklist = _StubBlacklist(hit={"level": 3, "reason": "诈骗"})
+        cfg = self._make_cfg(False)
+        workflow, _, queue = self._make_workflow(cfg, llm, blacklist)
+
+        async def scenario() -> int:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.pending_count()
+
+        count = asyncio.run(scenario())
+        self.assertEqual(blacklist.checked, [])
+        self.assertEqual(count, 1)
+
+    def test_hit_forces_violation(self) -> None:
+        # 第一次 LLM 返回不违规，但黑库命中 -> 强制违规入队
+        llm = _StubLLM(
+            responses=[
+                '{"illegal": false, "risk": 10, "type": "", "reason": "正常", "evidence": [], "suggestion": "warn"}'
+            ]
+        )
+        blacklist = _StubBlacklist(hit={"level": 3, "reason": "诈骗"})
+        cfg = self._make_cfg(True)
+        workflow, _, queue = self._make_workflow(cfg, llm, blacklist)
+
+        async def scenario() -> list:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.list_pending("g1")
+
+        tasks = asyncio.run(scenario())
+        self.assertEqual(blacklist.checked, ["10001"])
+        self.assertEqual(len(tasks), 1)
+        self.assertTrue(tasks[0].result.illegal)
+
+    def test_hit_preserves_normal_violation(self) -> None:
+        llm = _StubLLM()
+        blacklist = _StubBlacklist(hit={"level": 2, "reason": "刷屏"})
+        cfg = self._make_cfg(True)
+        workflow, _, queue = self._make_workflow(cfg, llm, blacklist)
+
+        async def scenario() -> list:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.list_pending("g1")
+
+        tasks = asyncio.run(scenario())
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].result.risk, 95)
+
+    def test_no_hit_no_forced_violation(self) -> None:
+        llm = _StubLLM(
+            responses=[
+                '{"illegal": false, "risk": 10, "type": "", "reason": "正常", "evidence": [], "suggestion": "warn"}'
+            ]
+        )
+        blacklist = _StubBlacklist(hit=None)
+        cfg = self._make_cfg(True)
+        workflow, _, queue = self._make_workflow(cfg, llm, blacklist)
+
+        async def scenario() -> int:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.pending_count()
+
+        count = asyncio.run(scenario())
+        self.assertEqual(blacklist.checked, ["10001"])
+        self.assertEqual(count, 0)
+
+    def test_unavailable_adapter_skipped(self) -> None:
+        llm = _StubLLM()
+        blacklist = _StubBlacklist(hit={"level": 3}, available=False)
+        cfg = self._make_cfg(True)
+        workflow, _, queue = self._make_workflow(cfg, llm, blacklist)
+
+        async def scenario() -> int:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.pending_count()
+
+        count = asyncio.run(scenario())
+        self.assertEqual(blacklist.checked, [])
+        self.assertEqual(count, 1)
+
+
+class PimengAdapterCheckTest(unittest.TestCase):
+    """皮梦云黑库适配器 check_user（本地缓存优先 + 云端回退）。"""
+
+    @staticmethod
+    def _adapter(hit_uid: str = "10001") -> PimengBlacklistAdapter:
+        class _FakeService:
+            def get_user_data(self, uid: str):
+                if uid == hit_uid:
+                    return {"level": 3, "reason": "诈骗", "added_at": "t", "added_by": "a"}
+                return None
+
+        class _FakeAPI:
+            async def check_blacklist(self, uid: str, user_type: str):
+                if uid == hit_uid:
+                    return {
+                        "success": True,
+                        "data": {"level": 3, "reason": "诈骗", "added_at": "t", "added_by": "a"},
+                    }
+                return {"success": True, "data": None}
+
+        class _StarCls:
+            api = _FakeAPI()
+            service = _FakeService()
+
+        class _Meta:
+            name = "astrbot_plugin_pimeng_blacklist"
+            star_cls = _StarCls()
+
+        class _Ctx:
+            def get_all_stars(self):
+                return [_Meta()]
+
+        return PimengBlacklistAdapter(_Ctx())
+
+    def test_available_when_plugin_found(self) -> None:
+        adapter = self._adapter()
+        self.assertTrue(adapter.available)
+
+    def test_hit_returns_record(self) -> None:
+        hit = asyncio.run(self._adapter().check_user("10001"))
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["level"], 3)
+        self.assertEqual(hit["user_id"], "10001")
+
+    def test_miss_returns_none(self) -> None:
+        hit = asyncio.run(self._adapter().check_user("99999"))
+        self.assertIsNone(hit)
+
+    def test_empty_user_returns_none(self) -> None:
+        adapter = self._adapter()
+        self.assertIsNone(asyncio.run(adapter.check_user("")))
 
 
 def _make_task(group_id: str = "g1", user_id: str = "u1") -> ReviewTask:
