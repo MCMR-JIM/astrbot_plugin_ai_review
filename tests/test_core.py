@@ -714,9 +714,10 @@ class PimengAdapterCheckTest(unittest.TestCase):
                 if uid == hit_uid:
                     return {
                         "success": True,
+                        "in_blacklist": True,
                         "data": {"level": 3, "reason": "诈骗", "added_at": "t", "added_by": "a"},
                     }
-                return {"success": True, "data": None}
+                return {"success": True, "in_blacklist": False, "data": None}
 
         class _StarCls:
             api = _FakeAPI()
@@ -749,6 +750,39 @@ class PimengAdapterCheckTest(unittest.TestCase):
     def test_empty_user_returns_none(self) -> None:
         adapter = self._adapter()
         self.assertIsNone(asyncio.run(adapter.check_user("")))
+
+    def test_cloud_hit_when_cache_miss(self) -> None:
+        """本地缓存未命中但云端 in_blacklist=true 时返回云端记录。"""
+        class _FakeServiceEmpty:
+            def get_user_data(self, uid: str):
+                return None
+
+        class _FakeAPI:
+            async def check_blacklist(self, uid: str, user_type: str):
+                return {
+                    "success": True,
+                    "in_blacklist": True,
+                    "data": {"level": 4, "reason": "严重", "added_at": "t", "added_by": "a"},
+                }
+
+        class _StarCls:
+            api = _FakeAPI()
+            service = _FakeServiceEmpty()
+
+        class _Meta:
+            name = "astrbot_plugin_pimeng_blacklist"
+            star_cls = _StarCls()
+
+        class _Ctx:
+            def get_all_stars(self):
+                return [_Meta()]
+
+        adapter = PimengBlacklistAdapter(_Ctx())
+        hit = asyncio.run(adapter.check_user("77777"))
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["level"], 4)
+        self.assertTrue(hit.get("cloud"))
+        self.assertEqual(hit["user_id"], "77777")
 
 
 def _make_task(group_id: str = "g1", user_id: str = "u1") -> ReviewTask:

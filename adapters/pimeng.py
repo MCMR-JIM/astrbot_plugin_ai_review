@@ -139,12 +139,13 @@ class PimengBlacklistAdapter(BlacklistAdapter):
         except Exception:
             record = None
         # 2) 云端实时查询（含限流与缓存，由皮梦云插件内部处理）
+        #    兼容 v3.0.0：命中标志为顶层 in_blacklist，数据在顶层 data。
         try:
             api = self._plugin.api
             raw = await api.check_blacklist(str(user_id), "user")
-            if raw and raw.get("success"):
-                data = (raw.get("data") or {}).get("blacklist") or raw.get("data")
-                if isinstance(data, dict) and data:
+            if raw and raw.get("success") and raw.get("in_blacklist"):
+                data = raw.get("data") or {}
+                if isinstance(data, dict):
                     record = {
                         "level": data.get("level", 1),
                         "reason": data.get("reason", ""),
