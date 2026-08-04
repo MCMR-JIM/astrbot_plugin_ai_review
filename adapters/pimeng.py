@@ -1,8 +1,11 @@
 """基于皮梦云黑库插件的同步适配器。
 
 通过 AstrBot Context 发现已加载的 astrbot_plugin_pimeng_blacklist 插件实例，
-调用其 api.add_to_blacklist 同步黑库。插件未安装或不可用时自动跳过，
-不影响插件正常运行（弱依赖）。
+两插件互相通信（实例互调）：
+- AI 审核 → 皮梦云：调用 api.add_to_blacklist 同步黑库。
+- 皮梦云 → AI 审核：调用 service.is_user_blacklisted / api.check_blacklist
+  查询用户是否已在黑库，供审核流程加重判定。
+插件未安装或不可用时自动跳过，不影响插件正常运行（弱依赖）。
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ _SUGGESTION_TO_LEVEL = {
 
 
 class PimengBlacklistAdapter(BlacklistAdapter):
-    """皮梦云黑库插件适配器。"""
+    """皮梦云黑库插件适配器（两插件实例互调）。"""
 
     def __init__(self, context: Any) -> None:
         """初始化适配器。
@@ -38,7 +41,7 @@ class PimengBlacklistAdapter(BlacklistAdapter):
         self._discover()
 
     def _discover(self) -> None:
-        """发现已加载的皮梦云黑库插件实例。"""
+        """发现已加载的皮梦云黑库插件实例（Star 元数据中的 star_cls）。"""
         plugin = None
         try:
             for star in self._context.get_all_stars():
@@ -60,6 +63,12 @@ class PimengBlacklistAdapter(BlacklistAdapter):
             self._plugin is not None
             and getattr(self._plugin, "api", None) is not None
         )
+
+    def _service(self) -> Any:
+        """获取皮梦云插件本地缓存服务（可能为 None）。"""
+        if self._plugin is None:
+            return None
+        return getattr(self._plugin, "service", None)
 
     async def add_user(
         self,
@@ -103,3 +112,48 @@ class PimengBlacklistAdapter(BlacklistAdapter):
         level = _SUGGESTION_TO_LEVEL.get(task.result.suggestion, 1)
         reason = task.result.reason or f"AI 审核：{task.result.type or '违规'}"
         return await self.add_user(task.user_id, reason, level)
+
+    async def check_user(self, user_id: str) -> dict[str, Any] | None:
+        """查询用户是否在黑库（皮梦云 → AI 审核方向）。
+
+        优先读皮梦云插件本地缓存（同步后的数据，快且不触发限流）；
+        缓存不可用或未命中时回退云端实时查询。查询失败返回 None。
+
+        Args:
+            user_id: 用户 ID。
+
+        Returns:
+            命中时返回黑库记录（{"level", "reason", "added_at", "added_by"}），
+            未命中或不可用时返回 None。
+        """
+        if not user_id or not self.available:
+            return None
+        record: dict[str, Any] | None = None
+        # 1) 本地缓存优先
+        service = self._service()
+        try:
+            if service is not None:
+                cached = service.get_user_data(str(user_id))
+                if cached is not None:
+                    record = dict(cached)
+        except Exception:
+            record = None
+        # 2) 云端实时查询（含限流与缓存，由皮梦云插件内部处理）
+        try:
+            api = self._plugin.api
+            raw = await api.check_blacklist(str(user_id), "user")
+            if raw and raw.get("success"):
+                data = (raw.get("data") or {}).get("blacklist") or raw.get("data")
+                if isinstance(data, dict) and data:
+                    record = {
+                        "level": data.get("level", 1),
+                        "reason": data.get("reason", ""),
+                        "added_at": data.get("added_at", ""),
+                        "added_by": data.get("added_by", ""),
+                        "cloud": True,
+                    }
+        except Exception:
+            pass
+        if record:
+            record["user_id"] = str(user_id)
+        return record

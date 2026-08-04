@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import abc
+from typing import Any
 
 from ..models import ReviewTask
 
@@ -47,3 +48,15 @@ class BlacklistAdapter(abc.ABC):
         Returns:
             同步结果描述文本。
         """
+
+    async def check_user(self, user_id: str) -> dict[str, Any] | None:
+        """查询用户是否在黑库（可选实现，默认返回 None 表示未命中）。
+
+        Args:
+            user_id: 用户 ID。
+
+        Returns:
+            命中时返回黑库记录（如 {"level": 3, "reason": "..."}），
+            未命中或适配器不支持查询时返回 None。
+        """
+        return None

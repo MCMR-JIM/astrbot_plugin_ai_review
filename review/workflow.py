@@ -3,6 +3,7 @@
 职责：消息缓存与过滤、正则规则层预筛（命中跳过 LLM）、Prompt 组装、
 LLM 调用、结果解析（含重试）、阈值判断、可选二次审核、审核任务入队、
 结构化日志、违规规则沉淀。过滤/冷却/裁剪等辅助见 filters.py。
+可选：审核前查询皮梦云黑库，命中则加重风险判定。
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ class ReviewWorkflow:
         store: KVStore | None = None,
         rules: Any | None = None,
         executor: Any | None = None,
+        blacklist: Any | None = None,
     ) -> None:
         """初始化工作流。
 
@@ -60,6 +62,8 @@ class ReviewWorkflow:
             stats: 违规统计存储（可选）。
             store: KV 持久化存储（用于冷却表，可选）。
             rules: 正则规则引擎（可选，未配置时跳过规则层）。
+            executor: 平台执行器（用于群主/群管过滤，可选）。
+            blacklist: 黑库适配器（可选，审核前查询云黑加重判定）。
         """
         self.history = history
         self.prompt = prompt
@@ -68,6 +72,7 @@ class ReviewWorkflow:
         self._get_config = get_config
         self._stats = stats
         self._rules = rules
+        self._blacklist = blacklist
         self._cooldown = CooldownManager(get_config, store)
         self.filters = MessageFilters(get_config, self._cooldown, executor)
 
@@ -273,11 +278,22 @@ class ReviewWorkflow:
         )
 
         target_desc = ""
+        blacklist_hit: dict[str, Any] | None = None
         if target_user_id:
             target_desc = (
                 f"本次审核对象：{target_nickname or target_user_id}（{target_user_id}）。"
                 "请重点分析该用户的发言。"
             )
+            blacklist_hit = await self._check_blacklist(
+                group_id, target_user_id, config
+            )
+            if blacklist_hit:
+                level = blacklist_hit.get("level", "")
+                reason = blacklist_hit.get("reason", "")
+                target_desc += (
+                    f"\n⚠️ 注意：该用户已在云黑库中（等级 {level}，"
+                    f"原因：{reason or '未知'}）。请从严审核并确认违规。"
+                )
 
         system = self.prompt.build_system()
         user = self.prompt.build_user(records, target_desc)
@@ -295,15 +311,32 @@ class ReviewWorkflow:
             return None, "parse_failed"
 
         if not result.illegal or result.risk < threshold:
-            logger.info(
-                "[AI审核] 群=%s 用户=%s 判定无违规（risk=%d < %d），结束。",
-                group_id,
-                target_user_id or "(整体)",
-                result.risk,
-                threshold,
-            )
-            log_event("review_clean", group_id=group_id, risk=result.risk)
-            return None, "no_violation"
+            if blacklist_hit:
+                # 黑库命中用户从严处理：强制视为违规并入队（提升至阈值）
+                result.risk = max(result.risk, threshold)
+                result.illegal = True
+                log_event(
+                    "blacklist_forced_violation",
+                    group_id=group_id,
+                    user_id=target_user_id,
+                    level=blacklist_hit.get("level"),
+                )
+                logger.info(
+                    "[AI审核] 群=%s 用户=%s 命中云黑库，从严判定违规（risk=%d）。",
+                    group_id,
+                    target_user_id or "(整体)",
+                    result.risk,
+                )
+            else:
+                logger.info(
+                    "[AI审核] 群=%s 用户=%s 判定无违规（risk=%d < %d），结束。",
+                    group_id,
+                    target_user_id or "(整体)",
+                    result.risk,
+                    threshold,
+                )
+                log_event("review_clean", group_id=group_id, risk=result.risk)
+                return None, "no_violation"
 
         # 二次审核（可选）：初次判定违规后，用指定模型复核同一批记录，
         # 二次也判定违规才生成任务；二次失败回退初次判定（不中断审核）。
@@ -414,6 +447,43 @@ class ReviewWorkflow:
         if not second.illegal or second.risk < threshold:
             return used_provider, "clean"
         return used_provider, "confirmed"
+
+    async def _check_blacklist(
+        self,
+        group_id: str,
+        user_id: str,
+        config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """审核前查询皮梦云黑库（皮梦云 → AI 审核 通信方向）。
+
+        仅在启用 ``enable_blacklist_check`` 且黑库适配器可用时查询；
+        查询失败不影响审核（返回 None）。
+
+        Args:
+            group_id: 群号。
+            user_id: 目标用户 ID。
+            config: 当前生效配置。
+
+        Returns:
+            命中时返回黑库记录字典，否则返回 None。
+        """
+        if not bool(config.get("enable_blacklist_check", False)):
+            return None
+        if self._blacklist is None or not self._blacklist.available:
+            return None
+        try:
+            hit = await self._blacklist.check_user(user_id)
+        except Exception as exc:
+            logger.warning("[AI审核] 黑库查询异常（群=%s 用户=%s）：%s", group_id, user_id, exc)
+            return None
+        if hit:
+            log_event(
+                "blacklist_hit",
+                group_id=group_id,
+                user_id=user_id,
+                level=hit.get("level"),
+            )
+        return hit
 
     async def _enqueue_task(
         self,
