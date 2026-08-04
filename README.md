@@ -27,6 +27,7 @@ AI 自动分析群成员聊天记录，为管理员生成审核建议（风险�
 - **配置热加载**：配置修改后即时生效（含处罚配置）
 - **LLM 调用加固**：网络失败自动退避重试，采样温度可配置（默认 0.3 保证一致性）
 - **审核模型可追溯**：每个审核任务记录实际判定的模型 Provider，`/review list`、`/review detail`、通过处罚时均可确认；可通过 `llm_provider_id` 固定审核模型
+- **可选二次审核**：初次判定违规后，可用 `second_review_provider_id` 指定的模型复核同一批记录，两次均判违规才生成任务（降低误报）；二次审核失败自动回退初次判定
 - **Prompt 外置**：审核规则与提示词独立存放于文本文件，可热加载
 - **零第三方依赖**：仅使用 AstrBot 平台 API
 
@@ -252,6 +253,8 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 | `llm_max_concurrency` | int | 3 | 同时进行的模型请求数上限（最小 1） |
 | `llm_provider_id` | string | 空 | 固定审核使用的 AstrBot 模型 Provider ID；留空跟随会话默认模型（`/provider` 切换） |
 | `llm_temperature` | float | 0.3 | AI 采样温度（0~2），建议保持低温度保证审核一致性 |
+| `enable_second_review` | bool | false | 启用二次审核：初次违规后用第二个模型复核，两者都违规才生成任务 |
+| `second_review_provider_id` | string | 空 | 二次审核使用的模型 Provider ID；留空与初次审核同模型 |
 | `mute_duration` | int | 600 | mute 处罚禁言时长（秒） |
 | `admin_qq` | list | [] | AI 调用异常时向其发送告警私聊的管理员 QQ |
 | `max_chat_chars` | int | 3000 | 发送给 AI 的聊天记录总字符预算，超出丢弃更早的记录 |
@@ -271,6 +274,7 @@ AI 必须返回如下 JSON，`risk` 为 0~100 的整数，`suggestion` 只能取
 - **某群单独放宽/收紧**：`/reviewconfig group <群号> risk_threshold 85`（支持阈值、模式、被动开关、冷却、处罚参数等）
 - **自定义处罚**：`punish_pipeline={"kick": ["warn", "kick"]}`
 - **固定审核模型**：`/review provider` 查看已接入的模型，`/reviewconfig llm_provider_id <Provider ID>` 固定审核使用的模型；留空则跟随会话默认模型
+- **降低误报（二次审核）**：`enable_second_review=true`，并可选 `/reviewconfig second_review_provider_id <Provider ID>` 指定复核模型；二次审核判定无违规时不生成任务
 - **接入皮梦云黑库**：`enable_blacklist=true`，并确保皮梦云插件已启用且配置了 Bot Token
 - **管理员告警**：`admin_qq=["10000"]`（AI 调用失败时私聊通知）
 

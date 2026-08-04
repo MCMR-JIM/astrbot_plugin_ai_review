@@ -306,18 +306,40 @@ class TaskIdTest(unittest.TestCase):
 
 
 class _StubLLM:
-    """记录调用次数并返回固定审核结果的 LLM 桩。"""
+    """记录调用次数并返回固定审核结果的 LLM 桩。
 
-    def __init__(self) -> None:
+    支持按调用次序返回不同结果：``responses`` 为空时始终返回
+    违规判定（illegal=true, risk=95）。
+    """
+
+    def __init__(self, responses: list | None = None) -> None:
         self.calls = 0
         self.last_provider_id = "stub-model"
+        self._responses = responses or []
+        self.called_providers: list[str] = []
 
-    async def chat(self, system: str, user: str, output: str, umo: str) -> str:
+    async def chat(
+        self,
+        system: str,
+        user: str,
+        output: str,
+        umo: str,
+        provider_id: str = "",
+    ) -> str:
         self.calls += 1
-        return (
-            '{"illegal": true, "risk": 95, "type": "测试", '
-            '"reason": "r", "evidence": ["e"], "suggestion": "mute"}'
-        )
+        self.called_providers.append(provider_id)
+        if self._responses:
+            text = self._responses[min(self.calls - 1, len(self._responses) - 1)]
+        else:
+            text = (
+                '{"illegal": true, "risk": 95, "type": "测试", '
+                '"reason": "r", "evidence": ["e"], "suggestion": "mute"}'
+            )
+        # 模拟 LLMClient：仅显式指定 provider 且调用成功时更新 last_provider_id；
+        # 会话默认调用（空 provider_id）或失败调用保持原值。
+        if text is not None and provider_id:
+            self.last_provider_id = provider_id
+        return text
 
 
 class _StubGroupEvent:
@@ -440,6 +462,114 @@ class PassiveReviewWorkflowTest(unittest.TestCase):
         tasks = asyncio.run(scenario())
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].llm_provider, "auto_DeepSeek")
+
+
+class SecondReviewWorkflowTest(unittest.TestCase):
+    """二次审核：初次违规后用第二模型复核，两者都违规才入队。"""
+
+    @staticmethod
+    def _make_cfg(second: bool, second_provider: str = "second-model") -> dict:
+        cfg = PassiveReviewWorkflowTest._make_cfg(True)
+        cfg["enable_second_review"] = second
+        cfg["second_review_provider_id"] = second_provider
+        return cfg
+
+    @classmethod
+    def _make_workflow(cls, cfg: dict, llm: _StubLLM):
+        history = HistoryCache(lambda gid="": cfg)
+        prompt = PromptManager(
+            str(Path(__file__).resolve().parent.parent),
+            lambda gid="": cfg,
+        )
+        queue = ReviewQueue()
+        workflow = ReviewWorkflow(
+            history,
+            prompt,
+            llm,
+            queue,
+            lambda gid="": cfg,
+        )
+        return workflow, history, queue
+
+    def test_disabled_second_review_single_call(self) -> None:
+        llm = _StubLLM()
+        cfg = self._make_cfg(False)
+        workflow, _, queue = self._make_workflow(cfg, llm)
+
+        async def scenario() -> int:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.pending_count()
+
+        count = asyncio.run(scenario())
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(count, 1)
+
+    def test_second_confirms_both_violations(self) -> None:
+        llm = _StubLLM()
+        cfg = self._make_cfg(True, "second-model")
+        workflow, _, queue = self._make_workflow(cfg, llm)
+
+        async def scenario() -> list:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.list_pending("g1")
+
+        tasks = asyncio.run(scenario())
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].second_llm_provider, "second-model")
+        self.assertEqual(llm.called_providers, ["", "second-model"])
+
+    def test_second_clean_drops_task(self) -> None:
+        llm = _StubLLM(
+            responses=[
+                '{"illegal": true, "risk": 95, "type": "测试", "reason": "r", "evidence": ["e"], "suggestion": "mute"}',
+                '{"illegal": false, "risk": 10, "type": "", "reason": "正常", "evidence": [], "suggestion": "warn"}',
+            ]
+        )
+        cfg = self._make_cfg(True, "second-model")
+        workflow, _, queue = self._make_workflow(cfg, llm)
+
+        async def scenario() -> int:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.pending_count()
+
+        count = asyncio.run(scenario())
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(count, 0)
+
+    def test_second_failure_falls_back_to_first(self) -> None:
+        llm = _StubLLM(
+            responses=[
+                '{"illegal": true, "risk": 95, "type": "测试", "reason": "r", "evidence": ["e"], "suggestion": "mute"}',
+                None,
+            ]
+        )
+        cfg = self._make_cfg(True, "second-model")
+        workflow, _, queue = self._make_workflow(cfg, llm)
+
+        async def scenario() -> list:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.list_pending("g1")
+
+        tasks = asyncio.run(scenario())
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].llm_provider, "stub-model")
+        self.assertEqual(tasks[0].second_llm_provider, "")
+
+    def test_second_uses_same_model_when_provider_empty(self) -> None:
+        llm = _StubLLM()
+        cfg = self._make_cfg(True, "")
+        workflow, _, queue = self._make_workflow(cfg, llm)
+
+        async def scenario() -> list:
+            await workflow.on_message(_StubGroupEvent())
+            return await queue.list_pending("g1")
+
+        tasks = asyncio.run(scenario())
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(llm.called_providers, ["", ""])
 
 
 def _make_task(group_id: str = "g1", user_id: str = "u1") -> ReviewTask:

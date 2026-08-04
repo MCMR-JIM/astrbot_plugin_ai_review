@@ -83,20 +83,24 @@ class LLMClient:
         except (TypeError, ValueError):
             self._temperature = _DEFAULT_TEMPERATURE
 
-    async def _resolve_provider(self, umo: str) -> Any | None:
+    async def _resolve_provider(self, umo: str, provider_id: str = "") -> Any | None:
         """解析本次审核使用的对话模型 Provider。
 
-        优先使用配置的 ``llm_provider_id`` 指定的 Provider；未配置或
-        找不到时回退到会话当前使用的模型（``get_using_provider``）。
+        优先使用显式传入的 ``provider_id``；否则使用配置的
+        ``llm_provider_id``；均未配置或找不到时回退到会话当前使用的
+        模型（``get_using_provider``）。
 
         Args:
             umo: unified_message_origin，用于获取会话默认模型。
+            provider_id: 显式指定的 Provider ID（可空）。
 
         Returns:
             Provider 实例；解析失败时返回 None（内部已通知管理员）。
         """
         config = self._get_config()
-        provider_id = str(config.get("llm_provider_id", "") or "").strip()
+        provider_id = (provider_id or "").strip() or str(
+            config.get("llm_provider_id", "") or ""
+        ).strip()
         if provider_id:
             get_provider = getattr(self._context, "get_provider_by_id", None)
             if get_provider is not None:
@@ -142,20 +146,23 @@ class LLMClient:
         user_prompt: str,
         output_prompt: str,
         umo: str,
+        provider_id: str = "",
     ) -> str | None:
-        """调用当前会话模型完成一次文本生成。
+        """调用模型完成一次文本生成。
 
         Args:
             system_prompt: 系统提示词（审核规则）。
             user_prompt: 用户提示词（聊天记录）。
             output_prompt: 输出约束提示词（JSON 格式）。
             umo: unified_message_origin，用于获取该会话使用的模型。
+            provider_id: 显式指定使用的 Provider ID；留空跟随
+                llm_provider_id 配置或会话默认模型。
 
         Returns:
             模型返回的纯文本；无可用模型或调用失败时返回 None。
         """
         self._sync_config()
-        provider = await self._resolve_provider(umo)
+        provider = await self._resolve_provider(umo, provider_id)
         if provider is None:
             return None
         prompt = f"{user_prompt}\n\n{output_prompt}"

@@ -85,6 +85,19 @@
     "hint": "审核输出的一致性控制，0~2；建议保持低温度（默认 0.3）",
     "default": 0.3
   },
+  "enable_second_review": {
+    "type": "bool",
+    "description": "启用二次审核",
+    "hint": "初次 AI 判定违规后，用 second_review_provider_id 指定的模型对同一批聊天记录复核；二次也判定违规才生成审核任务（降低误报）。关闭后仅一次审核",
+    "default": false
+  },
+  "second_review_provider_id": {
+    "type": "string",
+    "description": "二次审核使用的 AstrBot 模型",
+    "hint": "仅 enable_second_review=true 时生效；在下拉框中选择二次复核模型。留空则与初次审核使用相同模型",
+    "_special": "select_provider",
+    "default": ""
+  },
   "mute_duration": {
     "type": "int",
     "description": "禁言时长（秒）",
