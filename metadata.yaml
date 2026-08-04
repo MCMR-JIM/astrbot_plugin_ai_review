@@ -1,7 +1,7 @@
 name: "astrbot_plugin_ai_review"
 version: "1.22"
 description: "基于 AstrBot 大模型的群聊 AI 审核插件，生成审核建议供管理员确认后执行处罚。"
-author: "Ni-ShuWu&kelai141"
+author: "Ni-ShuWu&kelai141&MCMR-JIM"
 license: "AGPL-3.0"
 repo: "https://github.com/Ni-ShuWu/astrbot_plugin_ai_review"
 tags: ["review", "ai", "moderation", "security"]
