@@ -1,8 +1,8 @@
 """审核工作流。
 
 职责：消息缓存与过滤、正则规则层预筛（命中跳过 LLM）、Prompt 组装、
-LLM 调用、结果解析（含重试）、阈值判断、审核任务入队、结构化日志、
-违规规则沉淀。过滤/冷却/裁剪等辅助见 filters.py。
+LLM 调用、结果解析（含重试）、阈值判断、可选二次审核、审核任务入队、
+结构化日志、违规规则沉淀。过滤/冷却/裁剪等辅助见 filters.py。
 """
 
 from __future__ import annotations
@@ -288,6 +288,7 @@ class ReviewWorkflow:
         if text is None:
             log_event("llm_call_failed", group_id=group_id)
             return None, "llm_failed"
+        first_provider = self.llm.last_provider_id
         result = await parse_with_llm_retry(self.llm, system, user, output, umo, text)
         if result is None:
             log_event("parse_failed", group_id=group_id)
@@ -304,6 +305,30 @@ class ReviewWorkflow:
             log_event("review_clean", group_id=group_id, risk=result.risk)
             return None, "no_violation"
 
+        # 二次审核（可选）：初次判定违规后，用指定模型复核同一批记录，
+        # 二次也判定违规才生成任务；二次失败回退初次判定（不中断审核）。
+        second_provider, second_outcome = await self._run_second_review(
+            event,
+            records,
+            target_user_id,
+            target_nickname,
+            config,
+            result,
+        )
+        if second_outcome == "clean":
+            logger.info(
+                "[AI审核] 群=%s 用户=%s 二次审核判定无违规，本次结束。",
+                group_id,
+                target_user_id or "(整体)",
+            )
+            log_event(
+                "second_review_clean",
+                group_id=group_id,
+                provider=second_provider,
+                first_risk=result.risk,
+            )
+            return None, "no_violation"
+
         task = await self._enqueue_task(
             event,
             records,
@@ -312,11 +337,83 @@ class ReviewWorkflow:
             result,
             group_id,
             config,
-            llm_provider=self.llm.last_provider_id,
+            llm_provider=first_provider,
+            second_llm_provider=second_provider,
         )
         if task is None:
             return None, "queue_rejected"
         return task, "task_created"
+
+    async def _run_second_review(
+        self,
+        event: "AstrMessageEvent",
+        records: list[ChatRecord],
+        target_user_id: str,
+        target_nickname: str,
+        config: dict[str, Any],
+        first_result: ReviewResult,
+    ) -> tuple[str, str]:
+        """执行二次审核：初次判定违规后用第二模型复核。
+
+        Args:
+            event: 消息事件。
+            records: 聊天上下文记录。
+            target_user_id: 目标用户 ID。
+            target_nickname: 目标用户昵称。
+            config: 当前生效配置。
+            first_result: 初次审核结果（违规）。
+
+        Returns:
+            (二次审核使用的 Provider ID, 结果分类)。
+            分类：confirmed=二次判定违规；clean=二次判定无违规；
+            skipped=未启用二次审核或无需复核；failed=调用/解析失败
+            （回退初次判定，由调用方按 confirmed 处理）。
+        """
+        if not bool(config.get("enable_second_review", False)):
+            return "", "skipped"
+        second_provider_id = str(
+            config.get("second_review_provider_id", "") or ""
+        ).strip()
+        target_desc = ""
+        if target_user_id:
+            target_desc = (
+                f"本次复核对象：{target_nickname or target_user_id}（{target_user_id}）。"
+                "请独立判断该用户的发言是否违规。"
+            )
+        system = self.prompt.build_system()
+        user = self.prompt.build_user(records, target_desc)
+        output = self.prompt.build_output()
+        umo = event.unified_msg_origin
+        threshold = safe_int(config.get("risk_threshold"), 80)
+
+        log_event(
+            "second_review_start",
+            provider=second_provider_id or "(会话默认)",
+            first_risk=first_result.risk,
+        )
+        text = await self.llm.chat(system, user, output, umo, second_provider_id)
+        if text is None:
+            log_event("second_review_failed", provider=second_provider_id)
+            return "", "failed"
+        second = await parse_with_llm_retry(
+            self.llm, system, user, output, umo, text, second_provider_id
+        )
+        if second is None:
+            log_event("second_review_parse_failed", provider=second_provider_id)
+            return "", "failed"
+        try:
+            used_provider = self.llm.last_provider_id
+        except Exception:
+            used_provider = second_provider_id
+        log_event(
+            "second_review_done",
+            provider=used_provider,
+            illegal=second.illegal,
+            risk=second.risk,
+        )
+        if not second.illegal or second.risk < threshold:
+            return used_provider, "clean"
+        return used_provider, "confirmed"
 
     async def _enqueue_task(
         self,
@@ -329,6 +426,7 @@ class ReviewWorkflow:
         config: dict[str, Any],
         rule_id: str = "",
         llm_provider: str = "",
+        second_llm_provider: str = "",
     ) -> ReviewTask | None:
         """创建并加入审核任务，记录冷却/统计/日志。
 
@@ -346,6 +444,7 @@ class ReviewWorkflow:
             session_id=event.unified_msg_origin,
             rule_id=rule_id,
             llm_provider=llm_provider,
+            second_llm_provider=second_llm_provider,
         )
         if not await self.queue.add(task):
             logger.warning(

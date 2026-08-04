@@ -203,7 +203,7 @@ class ReviewCommandMixin:
         return (
             f"⚠️ 已生成审核任务 #{task.task_id}\n"
             f"用户: {nickname}({uid})\n"
-            f"模型: {task.llm_provider or '未知'}\n"
+            f"模型: {ReviewCommandMixin._model_line(task)}\n"
             f"风险: {task.result.risk}  类型: {task.result.type or '-'}\n"
             f"原因: {task.result.reason or '-'}\n"
             f"建议: {task.result.suggestion}\n"
@@ -218,13 +218,21 @@ class ReviewCommandMixin:
             return "本次审核未发现违规，或暂无聊天记录。"
         return (
             f"⚠️ 已生成审核任务 #{task.task_id}（群聊整体）\n"
-            f"模型: {task.llm_provider or '未知'}\n"
+            f"模型: {ReviewCommandMixin._model_line(task)}\n"
             f"风险: {task.result.risk}  类型: {task.result.type or '-'}\n"
             f"原因: {task.result.reason or '-'}\n"
             f"建议: {task.result.suggestion}\n"
             f"请用 /review detail {task.task_id} 查看详情，"
             f"/review pass {task.task_id} 处理。"
         )
+
+    @staticmethod
+    def _model_line(task: "ReviewTask") -> str:
+        """生成任务判定模型展示文本（含二次审核模型）。"""
+        base = task.llm_provider or "未知"
+        if task.second_llm_provider:
+            return f"{base}（二次: {task.second_llm_provider}）"
+        return base
 
     # ---------- 队列管理 ----------
 
@@ -366,6 +374,8 @@ class ReviewCommandMixin:
             if approved.llm_provider
             else ("正则规则命中" if approved.rule_id else "未知来源")
         )
+        if approved.second_llm_provider:
+            provider_note += f"（二次: {approved.second_llm_provider}）"
         return (
             f"✅ 已通过任务 #{approved.task_id}（{provider_note}）。\n"
             f"{punishment_msg}"
@@ -695,7 +705,7 @@ class ReviewCommandMixin:
         """任务详情概要（不含聊天上下文，含同意/不同意命令）。"""
         evidence_lines = "\n".join(f"- {item}" for item in task.result.evidence) or "（无）"
         if task.llm_provider:
-            source_line = f"判定模型: {task.llm_provider}"
+            source_line = f"判定模型: {ReviewCommandMixin._model_line(task)}"
         elif task.rule_id:
             source_line = f"判定来源: 正则规则 #{task.rule_id}（未调用模型）"
         else:

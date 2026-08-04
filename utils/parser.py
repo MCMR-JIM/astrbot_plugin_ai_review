@@ -125,6 +125,7 @@ async def parse_with_llm_retry(
     output: str,
     umo: str,
     text: str,
+    provider_id: str = "",
 ) -> ReviewResult | None:
     """解析模型回复，失败自动重试一次，再次失败结束本次审核。
 
@@ -135,6 +136,7 @@ async def parse_with_llm_retry(
         output: 输出约束提示词。
         umo: unified_message_origin。
         text: 首次模型回复文本。
+        provider_id: 显式指定使用的 Provider ID（重试时保持一致）。
 
     Returns:
         审核结果；两次解析均失败时返回 None。
@@ -143,7 +145,7 @@ async def parse_with_llm_retry(
         return parse_review_result(text)
     except ValueError as first_err:
         logger.warning("[AI审核] 首次解析失败，重试一次：%s", first_err)
-        text = await llm.chat(system, user, output, umo)
+        text = await llm.chat(system, user, output, umo, provider_id)
         if text is None:
             return None
         try:

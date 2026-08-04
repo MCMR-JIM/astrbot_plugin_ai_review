@@ -209,6 +209,7 @@ class ReviewTask:
     session_id: str = ""
     rule_id: str = ""
     llm_provider: str = ""
+    second_llm_provider: str = ""
 
     @classmethod
     def create(
@@ -223,6 +224,7 @@ class ReviewTask:
         session_id: str = "",
         rule_id: str = "",
         llm_provider: str = "",
+        second_llm_provider: str = "",
     ) -> "ReviewTask":
         """创建审核任务。
 
@@ -252,6 +254,7 @@ class ReviewTask:
             session_id=session_id,
             rule_id=rule_id,
             llm_provider=llm_provider,
+            second_llm_provider=second_llm_provider,
         )
 
     def to_dict(self) -> dict:
@@ -272,6 +275,7 @@ class ReviewTask:
             "session_id": self.session_id,
             "rule_id": self.rule_id,
             "llm_provider": self.llm_provider,
+            "second_llm_provider": self.second_llm_provider,
         }
 
     @classmethod
@@ -312,6 +316,7 @@ class ReviewTask:
             session_id=str(data.get("session_id", "")),
             rule_id=str(data.get("rule_id", "")),
             llm_provider=str(data.get("llm_provider", "")),
+            second_llm_provider=str(data.get("second_llm_provider", "")),
         )
 
     @property
